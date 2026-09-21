@@ -66,6 +66,17 @@ also been downloaded locally as
 checksum is recorded in `SOURCE_HASHES.txt`. The `vendor` directory is excluded
 from Git because these third-party packages are large.
 
+STM32CubeProgrammer 2.19 is installed for the current Windows user at
+`%LOCALAPPDATA%\STMicroelectronics\STM32CubeProgrammer`. The GUI and signed CLI
+both start successfully. The installer could not write system-wide registry
+entries or install its optional ST-LINK driver without elevation; neither is
+required for the documented CP2104/UART route. Use the repository wrapper to
+invoke the CLI:
+
+```powershell
+.\stm32-programmer.cmd -l uart
+```
+
 The running robot identifies the control-board link as Silicon Labs CP2104
 USB-to-UART (`10c4:ea60`, serial `02C4DDB5`) and maps it to
 `/dev/myserial -> /dev/ttyUSB0`. The factory micro-ROS agent normally owns this

@@ -237,6 +237,7 @@ ROS 2 反馈，并且示例接收路径有缺失。
 - `docs/IMPLEMENTATION_PLAN.md`：架构、构建步骤和安全约束。
 - `firmware/m3pro_arm_feedback`：官方 STM32 示例的反馈补丁、校验值和实验 HEX。
 - `backups/2026-09-21-source-backup.md`：已拉回本机的 Jetson 源码备份清单。
+- `stm32-programmer.cmd`：调用已安装的 STM32CubeProgrammer 2.19 命令行工具。
 
 扩展工程默认不会驱动机械臂：控制模式为 `disabled`，反馈校准为无效，PC
 命令工具也默认只做 dry-run。
