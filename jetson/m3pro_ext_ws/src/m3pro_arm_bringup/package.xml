@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>m3pro_arm_bringup</name>
+  <version>0.1.0</version>
+  <description>Bringup files for the ROSMASTER M3 Pro arm extension.</description>
+  <maintainer email="devnull@example.com">M3 Pro extension maintainers</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>m3pro_arm_bridge</exec_depend>
+  <exec_depend>m3pro_arm_safety</exec_depend>
+  <exec_depend>rosapi</exec_depend>
+  <exec_depend>rosbridge_server</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

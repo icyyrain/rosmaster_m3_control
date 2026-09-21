@@ -1,0 +1,20 @@
+arm_state_bridge:
+  ros__parameters:
+    raw_feedback_topic: /arm/servo_states_raw
+    joint_state_topic: /joint_states
+    status_topic: /arm/feedback_status
+    joint_names:
+      - arm_joint_1
+      - arm_joint_2
+      - arm_joint_3
+      - arm_joint_4
+      - arm_joint_5
+      - arm_joint_6
+
+    # Keep false until every joint has been measured and its direction verified.
+    calibration_valid: false
+    raw_center: [2000.0, 2000.0, 2000.0, 2000.0, 1486.0, 3100.0]
+    position_at_center_deg: [90.0, 90.0, 90.0, 90.0, 90.0, 90.0]
+    degrees_per_count: [0.06916, 0.06916, 0.06916, 0.06916, 0.06916, 0.06916]
+    direction: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    velocity_filter_alpha: 0.25

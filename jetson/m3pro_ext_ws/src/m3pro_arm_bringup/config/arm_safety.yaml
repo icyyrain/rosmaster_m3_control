@@ -1,0 +1,23 @@
+arm_command_mux:
+  ros__parameters:
+    output_topic: /arm6_joints
+    feedback_topic: /joint_states
+    mode_topic: /arm/control_mode
+    status_topic: /arm/safety_status
+    teleop_topic: /arm/command/teleop
+    test_topic: /arm/command/test
+    rl_topic: /arm/command/rl
+
+    # Fail closed until real calibrated feedback is available.
+    require_feedback: true
+    feedback_timeout_sec: 0.25
+    command_timeout_sec: 0.5
+    min_command_period_sec: 0.05
+    min_motion_time_ms: 100
+    max_motion_time_ms: 2000
+
+    # Conservative initial values; verify these against the actual mechanism.
+    joint_min_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    joint_max_deg: [180.0, 180.0, 180.0, 180.0, 180.0, 180.0]
+    max_step_deg: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+    max_tracking_error_deg: [15.0, 15.0, 15.0, 15.0, 15.0, 15.0]

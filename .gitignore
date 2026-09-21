@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# ROS 2 / colcon outputs
+build/
+install/
+log/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Hardware/source snapshots can be large and may contain third-party binaries.
+# Keep their manifests and notes in Git, but store the payload outside Git.
+backups/remote/
+vendor/
+
