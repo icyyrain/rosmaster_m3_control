@@ -66,6 +66,12 @@ also been downloaded locally as
 checksum is recorded in `SOURCE_HASHES.txt`. The `vendor` directory is excluded
 from Git because these third-party packages are large.
 
+The running robot identifies the control-board link as Silicon Labs CP2104
+USB-to-UART (`10c4:ea60`, serial `02C4DDB5`) and maps it to
+`/dev/myserial -> /dev/ttyUSB0`. The factory micro-ROS agent normally owns this
+port at 2,000,000 baud, so it must be stopped before entering the ROM bootloader
+or attempting any programmer connection.
+
 Before the first write, read and save the currently installed flash if the
 programmer permits it; then verify that the official rollback HEX can at least
 be opened and that the board's BOOT and RESET buttons are accessible. The

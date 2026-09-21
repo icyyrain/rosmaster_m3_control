@@ -13,6 +13,8 @@ ROS 2/rosbridge 与 ROSMASTER M3 Pro 交互，最终用于“读取真实机械�
 - SSH 用户名：`jetson`
 - SSH 密码：`yahboom`
 - ROS 域：`ROS_DOMAIN_ID=30`
+- 控制板串口：`/dev/myserial -> /dev/ttyUSB0`
+- USB 串口芯片：Silicon Labs CP2104，序列号 `02C4DDB5`
 - Windows 有线网卡：`Realtek Gaming 2.5GbE Family Controller`
 - Windows 直连小车时的地址：`192.168.2.10/24`
 
@@ -191,6 +193,10 @@ ROS 2 反馈，并且示例接收路径有缺失。
   `/joint_states`，也保留原始计数兼容模式。
 - `m3pro_arm_safety`：在 PC/算法指令与 `/arm6_joints` 之间做安全仲裁。
 - `m3pro_arm_bringup`：提供机械臂栈和 rosbridge 的启动文件。
+
+2026-09-21 已把支持 `/arm6_joints_feedback` 的新版桥接代码同步到 Jetson，并重新编译
+`m3pro_arm_bridge` 与 `m3pro_arm_bringup`。两个节点通过短时启动检查后已退出，没有设置
+自启动。
 
 扩展节点当前没有启动，也没有写入 `.bashrc` 或开机自启动。安全默认值如下：
 
