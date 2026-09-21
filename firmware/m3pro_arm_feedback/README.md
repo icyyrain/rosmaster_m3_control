@@ -60,6 +60,12 @@ program. Official instructions:
 
 <https://www.yahboom.net/public/upload/upload-html/1755253798/4.Burning%20STM32%20firmware%20using%20serial%20port.html>
 
+The official Yahboom Drive copy of STM32CubeProgrammer 2.19 for Windows has
+also been downloaded locally as
+`vendor/yahboom_m3pro_official/tools/en.stm32cubeprg-win64-v2-19-0.zip`; its
+checksum is recorded in `SOURCE_HASHES.txt`. The `vendor` directory is excluded
+from Git because these third-party packages are large.
+
 Before the first write, read and save the currently installed flash if the
 programmer permits it; then verify that the official rollback HEX can at least
 be opened and that the board's BOOT and RESET buttons are accessible. The
