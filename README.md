@@ -177,8 +177,9 @@ ROS 2 反馈，并且示例接收路径有缺失。
 
 重要限制：官方附件没有当前完整原厂 `YB_Node` 的 STM32 源码。实验固件的节点是
 `YB_Example_Node`，刷入后会临时替换原厂控制板程序，底盘、里程计、IMU、电池等功能
-可能消失。原厂回退固件 `microROS_STM32-FW_V1.1.3.hex` 已下载并校验，但在确认物理
-ST-LINK/CubeProgrammer 回退链路前不会刷写。详细说明见
+可能消失。原厂回退固件 `microROS_STM32-FW_V1.1.3.hex` 已下载并校验。官方资料已确认
+可以用控制板 Type-C 串口、STM32CubeProgrammer 和 BOOT/RESET 键刷写；但在现场确认
+端口、按键并先尝试读取现有 Flash 前不会刷写。详细说明见
 `firmware/m3pro_arm_feedback/README.md`。
 
 ## 新增扩展工程状态

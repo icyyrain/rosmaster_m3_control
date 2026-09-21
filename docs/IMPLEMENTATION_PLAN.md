@@ -75,7 +75,8 @@ Yahboom's official `Subscriber_uart_servo` STM32H743 example. It:
 
 Do not treat the compiled sample as production firmware: it is not the complete
 factory `YB_Node`. Obtain the factory source and port the patch when possible.
-For a temporary hardware proof, first establish an ST-LINK recovery path and
-verify the downloaded factory rollback HEX checksum. After real readings arrive,
+For a temporary hardware proof, first establish the documented Type-C/UART
+CubeProgrammer recovery path (or SWD), save the currently installed flash when
+possible, and verify the downloaded factory rollback HEX checksum. After real readings arrive,
 validate each joint's direction, physical zero, usable limits, update
 `position_offset_deg`/`direction`, and only then enable command arbitration.

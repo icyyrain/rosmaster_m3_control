@@ -48,11 +48,22 @@ following:
 
 1. The factory rollback HEX is present and its checksum matches
    `SOURCE_HASHES.txt`.
-2. A working ST-LINK/CubeProgrammer recovery path is physically available.
+2. A working UART or SWD recovery path is physically available.
 3. The robot is supported so the arm cannot collide with the chassis or desk.
 4. The sample is first tested with torque/motion risk controlled.
 
-The preferred production route is to obtain the factory `YB_Node` STM32 source
+Yahboom's M3 Pro control-board course documents a serial recovery route: connect
+the control board to Windows using its Type-C data port, select UART in
+STM32CubeProgrammer, hold **BOOT**, press **RESET**, then release **BOOT** before
+connecting/programming. The serial port must not be held by micro-ROS or another
+program. Official instructions:
+
+<https://www.yahboom.net/public/upload/upload-html/1755253798/4.Burning%20STM32%20firmware%20using%20serial%20port.html>
+
+Before the first write, read and save the currently installed flash if the
+programmer permits it; then verify that the official rollback HEX can at least
+be opened and that the board's BOOT and RESET buttons are accessible. The
+preferred production route is still to obtain the factory `YB_Node` STM32 source
 from Yahboom and port the same small feedback loop into it. The sample build is
 useful as a hardware/protocol proof, not yet as the final robot firmware.
 
@@ -71,4 +82,3 @@ six-joint sweeps per second. Measure the real rate before using it in a control
 loop. This is suitable for initial state-observation experiments, but a serious
 real-time RL controller will likely need higher-rate firmware and an on-robot
 policy process rather than a Windows/rosbridge round trip.
-
