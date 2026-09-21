@@ -66,12 +66,23 @@ also been downloaded locally as
 checksum is recorded in `SOURCE_HASHES.txt`. The `vendor` directory is excluded
 from Git because these third-party packages are large.
 
-STM32CubeProgrammer 2.19 is installed for the current Windows user at
-`%LOCALAPPDATA%\STMicroelectronics\STM32CubeProgrammer`. The GUI and signed CLI
-both start successfully. The installer could not write system-wide registry
-entries or install its optional ST-LINK driver without elevation; neither is
-required for the documented CP2104/UART route. Use the repository wrapper to
-invoke the CLI:
+STM32CubeProgrammer 2.19 is installed, but not where an earlier revision of
+this file claimed. `%LOCALAPPDATA%\STMicroelectronics\STM32CubeProgrammer` does
+not exist. The installer was run inside the OpenAI Codex MSIX container, so its
+writes were redirected into that package's private store:
+
+```text
+%LOCALAPPDATA%\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\STMicroelectronics\STM32CubeProgrammer
+```
+
+The CLI there reports 2.19.0 and runs. The installer could not write
+system-wide registry entries or install its optional ST-LINK driver without
+elevation; neither is required for the documented CP2104/UART route.
+
+That location is owned by another application and disappears if it is reset or
+uninstalled. Before doing any actual flashing, reinstall from the local vendor
+copy to a normal path. Use the repository wrapper, which tries the standard
+per-user path, then the container path, then Program Files:
 
 ```powershell
 .\stm32-programmer.cmd -l uart

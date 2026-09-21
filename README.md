@@ -15,6 +15,7 @@ ROS 2/rosbridge 与 ROSMASTER M3 Pro 交互，最终用于“读取真实机械�
 - ROS 域：`ROS_DOMAIN_ID=30`
 - 控制板串口：`/dev/myserial -> /dev/ttyUSB0`
 - USB 串口芯片：Silicon Labs CP2104，序列号 `02C4DDB5`
+- 深度相机：Orbbec DaBai DCW2，话题命名空间 `/high_camera`，驱动需手动启动
 - Windows 有线网卡：`Realtek Gaming 2.5GbE Family Controller`
 - Windows 直连小车时的地址：`192.168.2.10/24`
 
@@ -119,6 +120,9 @@ python .\pc_client\monitor.py --host 192.168.2.4
 刷入，因此现在仍不会出现有效的 `/joint_states`；刷入并验证后，Jetson 桥接会把
 `/arm6_joints_feedback` 转成 `/joint_states`。
 
+注意 `roslibpy` 底层的 twisted reactor 在一个进程里只能启动一次，因此每个客户端
+进程只能连接一次 rosbridge。需要同时看两路画面时，请开两个终端各跑一个进程。
+
 扩展机械臂状态转换和安全仲裁可在另一个 SSH 终端启动：
 
 ```bash
@@ -132,7 +136,81 @@ ros2 launch m3pro_arm_bringup arm_stack.launch.py
 这个启动文件本身不会命令机械臂运动。现阶段它会报告反馈/标定未就绪，并保持控制
 模式为 `disabled`。
 
-### 3. 机械臂命令
+### 3. 摄像头
+
+小车装有 Orbbec DaBai DCW2 深度相机（USB `2bc5:0561` 彩色 + `2bc5:06a0` 深度）。
+驱动没有设置自启动，需要时在小车上运行：
+
+```bash
+ros2 launch orbbec_camera dabai_dcw2.launch.py
+```
+
+话题在 `/high_camera` 命名空间下。实测（Windows 经 rosbridge 直连千兆）：
+
+| 流 | 分辨率 | 实测帧率 | 带宽 |
+| --- | --- | --- | --- |
+| `color/image_raw/compressed` | 1280x720 | 29.5 fps | 3.1 MB/s |
+| `depth/image_raw` | 640x360 | 9.7 fps | 4.3 MB/s |
+| `ir/image_raw/compressed` | 640x400 | 10 fps | 161 KB/s |
+
+两个容易踩的坑：
+
+- 话题 `/rgb` 不是摄像头。它是 `std_msgs/msg/ColorRGBA`，`YB_Node` 订阅它来控制
+  车身 RGB 灯带。
+- `depth/image_raw/compressed` 是空的。驱动 advertise 了该话题，但每条消息只有
+  88 字节，只有消息头没有数据（16 位深度无法走 JPEG）。要深度必须订阅原始
+  `depth/image_raw`，它是 16UC1，像素值即毫米，可用于真实测量。
+
+彩色原始帧约 2.7 MB，30 fps 下远超 WebSocket 承载能力，因此彩色和红外一律使用
+compressed 流。点云 `depth_registered/points` 建议在 Jetson 上处理，不要拉回
+Windows。
+
+在 Windows 上实时查看：
+
+```powershell
+python .\pc_client\camera_view.py                    # 彩色
+python .\pc_client\camera_view.py --stream depth     # 深度，显示中心点毫米数
+python .\pc_client\camera_view.py --stream ir        # 红外
+```
+
+窗口内 `q` 退出，`s` 保存快照。
+
+### 4. 画面加机械臂点动的联合 demo
+
+`pc_client/teleop_view.py` 在一个窗口里同时显示相机画面和机械臂点动控制，两者共用
+同一条 rosbridge 连接。默认只显示不发送：
+
+```powershell
+python .\pc_client\teleop_view.py --home
+```
+
+确认无误后加 `--execute` 才会真实驱动机械臂，并且需要在终端手动输入 `MOVE` 确认：
+
+```powershell
+python .\pc_client\teleop_view.py --home --execute
+```
+
+窗口内按键：`1`-`6` 选关节（6 为夹爪），`j`/`k` 点动，`[`/`]` 调步长，`o`/`c` 夹爪
+开合，`h` 回到初始姿态，空格保持，`s` 存图，`q` 退出。
+
+不需要画面时可以用纯终端版本 `pc_client/arm_demo.py`，按键相同。
+
+两者共用 `pc_client/arm_control.py` 中的运动包络，关节限位只在该文件中定义一处。
+
+因为没有关节反馈，程序只能记住自己发出的指令，无法知道机械臂实际位置。所以每次
+启动必须二选一：`--home` 用 3 秒慢速走到原厂静止位 `[90, 120, 0, 0, 90, 90]` 建立
+基准，或 `--assume-pose J1..J6` 由操作者声明当前姿态且不产生运动。两个都给或都不给
+会直接拒绝启动。退出时会打印最后一次指令姿态，便于下次用 `--assume-pose` 接续。
+
+`--home` 那一次运动是从未知位置出发的，使用前先目视确认机械臂当前姿态与初始位置
+相差不大。另外原厂 `/joy_ctrl` 节点也在发布 `/arm6_joints`，使用期间请放下手柄，
+避免两个发布者同时下发指令。
+
+这两个工具都绕过了 `m3pro_arm_safety` 仲裁器，直接发布 `/arm6_joints`。这是有意为
+之：仲裁器要求真实反馈，当前条件下必然拒绝转发。等固件刷入且 `/joint_states` 有
+真实数据后，应改为经 `/arm/command/test` 走仲裁。
+
+### 5. 机械臂命令
 
 原厂命令格式如下，执行后机械臂会真实运动：
 
@@ -234,6 +312,12 @@ ROS 2 反馈，并且示例接收路径有缺失。
 
 - `jetson/m3pro_ext_ws`：部署到 Jetson 的 ROS2 工作区。
 - `pc_client`：通过 rosbridge 连接小车的 Windows 客户端。
+  - `monitor.py`：只读监控 `/battery`、`/joint_states` 等话题。
+  - `arm_control.py`：共享的运动包络与点动逻辑，关节限位的唯一定义处。
+  - `arm_demo.py`：纯终端的机械臂点动，默认 dry-run。
+  - `camera_view.py`：实时查看相机彩色、深度或红外流。
+  - `teleop_view.py`：画面与机械臂点动合并到一个窗口，默认 dry-run。
+  - `safe_command.py`：经安全仲裁器下发单条指令，默认 dry-run。
 - `docs/IMPLEMENTATION_PLAN.md`：架构、构建步骤和安全约束。
 - `firmware/m3pro_arm_feedback`：官方 STM32 示例的反馈补丁、校验值和实验 HEX。
 - `backups/2026-09-21-source-backup.md`：已拉回本机的 Jetson 源码备份清单。
