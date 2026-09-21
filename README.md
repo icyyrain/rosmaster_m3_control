@@ -113,8 +113,9 @@ pip install -r .\pc_client\requirements.txt
 python .\pc_client\monitor.py --host 192.168.2.4
 ```
 
-当前监控程序可以看到 rosbridge 连接情况和已有的 `/battery` 数据；只有接入真实舵机
-反馈后才会出现有效的 `/joint_states`。
+当前监控程序可以看到 rosbridge 连接情况和已有的 `/battery` 数据。实验反馈固件尚未
+刷入，因此现在仍不会出现有效的 `/joint_states`；刷入并验证后，Jetson 桥接会把
+`/arm6_joints_feedback` 转成 `/joint_states`。
 
 扩展机械臂状态转换和安全仲裁可在另一个 SSH 终端启动：
 
@@ -153,38 +154,48 @@ python .\pc_client\safe_command.py --joints 90 90 90 90 90 90 --time-ms 200
 
 ## 当前机械臂反馈结论
 
-目前无法从现有 ROS 2 节点读到真实关节角：`/arm6_joints` 是命令话题，原厂节点内部
-保存的目标值也不能证明舵机已经到达。硬件舵机总线大概率支持位置查询，但需要在
-STM32 固件中加入查询、校验、超时处理和 micro-ROS 发布。
+目前无法从正在运行的原厂 ROS 2 节点读到真实关节角：`/arm6_joints` 是命令话题，
+原厂节点内部保存的目标值也不能证明舵机已经到达。现已从 Yahboom 官方附件确认，
+总线舵机支持读取当前位置寄存器；官方 STM32 示例也包含位置查询代码，但未发布为
+ROS 2 反馈，并且示例接收路径有缺失。
 
 计划中的数据链路是：
 
 ```text
 舵机位置查询
   → STM32 固件
-  → micro-ROS /arm/servo_states_raw
+  → micro-ROS /arm6_joints_feedback
   → Jetson arm_state_bridge
-  → 标准 /joint_states
+  → 标准 /joint_states（弧度）
   → Windows 强化学习程序
 ```
 
-已在小车硬盘中只读搜索过常见 C/C++ 源码，没有找到包含 `Arm_Set_Angle` 的 STM32
-工程源码。因此下一步需要从同事或 Yahboom 获取与当前控制板匹配的 STM32 工程。
-拿到后应先在电脑上离线修改和审查差异，未经确认不要烧录。
+本地 `firmware/m3pro_arm_feedback` 已包含一个可审查补丁和编译通过的实验 HEX。它基于
+官方 `Subscriber_uart_servo` 示例：轮询 1–6 号舵机、校验响应、超时返回 `-1`，每完成
+一次六轴扫描便发布 `/arm6_joints_feedback`。同时保留 `/arm_joint` 并补上
+`/arm6_joints` 命令订阅。
+
+重要限制：官方附件没有当前完整原厂 `YB_Node` 的 STM32 源码。实验固件的节点是
+`YB_Example_Node`，刷入后会临时替换原厂控制板程序，底盘、里程计、IMU、电池等功能
+可能消失。原厂回退固件 `microROS_STM32-FW_V1.1.3.hex` 已下载并校验，但在确认物理
+ST-LINK/CubeProgrammer 回退链路前不会刷写。详细说明见
+`firmware/m3pro_arm_feedback/README.md`。
 
 ## 新增扩展工程状态
 
 `/home/jetson/m3pro_ext_ws` 已部署并成功编译以下四个 ROS 2 包：
 
-- `m3pro_arm_msgs`：定义 STM32 原始反馈消息。
-- `m3pro_arm_bridge`：把原始数据校准并转换成 `/joint_states`。
+- `m3pro_arm_msgs`：保留一条原始计数反馈的备用消息定义。
+- `m3pro_arm_bridge`：默认把 `/arm6_joints_feedback` 的实测角度转换成
+  `/joint_states`，也保留原始计数兼容模式。
 - `m3pro_arm_safety`：在 PC/算法指令与 `/arm6_joints` 之间做安全仲裁。
 - `m3pro_arm_bringup`：提供机械臂栈和 rosbridge 的启动文件。
 
 扩展节点当前没有启动，也没有写入 `.bashrc` 或开机自启动。安全默认值如下：
 
 - 控制模式为 `disabled`。
-- `calibration_valid: false`，不会伪造或发布关节状态。
+- 角度反馈中任一关节为 `-1` 或越界时，对应 `/joint_states` 值为 `NaN`，安全仲裁会
+  拒绝使用这一帧。
 - 安全仲裁要求真实反馈，反馈缺失或超时即拒绝控制。
 - Windows 命令工具默认为 dry-run。
 - 原厂手柄节点目前仍可直接发布 `/arm6_joints`，尚未统一接入仲裁器。
@@ -217,6 +228,8 @@ STM32 固件中加入查询、校验、超时处理和 micro-ROS 发布。
 - `jetson/m3pro_ext_ws`：部署到 Jetson 的 ROS2 工作区。
 - `pc_client`：通过 rosbridge 连接小车的 Windows 客户端。
 - `docs/IMPLEMENTATION_PLAN.md`：架构、构建步骤和安全约束。
+- `firmware/m3pro_arm_feedback`：官方 STM32 示例的反馈补丁、校验值和实验 HEX。
+- `backups/2026-09-21-source-backup.md`：已拉回本机的 Jetson 源码备份清单。
 
 扩展工程默认不会驱动机械臂：控制模式为 `disabled`，反馈校准为无效，PC
 命令工具也默认只做 dry-run。

@@ -1,5 +1,8 @@
 arm_state_bridge:
   ros__parameters:
+    # "degrees" consumes the new MCU topic. "raw" keeps the older custom-message path.
+    input_mode: degrees
+    degree_feedback_topic: /arm6_joints_feedback
     raw_feedback_topic: /arm/servo_states_raw
     joint_state_topic: /joint_states
     status_topic: /arm/feedback_status
@@ -11,10 +14,13 @@ arm_state_bridge:
       - arm_joint_5
       - arm_joint_6
 
-    # Keep false until every joint has been measured and its direction verified.
+    # Raw-mode calibration. It is ignored while input_mode is "degrees".
     calibration_valid: false
     raw_center: [2000.0, 2000.0, 2000.0, 2000.0, 1486.0, 3100.0]
     position_at_center_deg: [90.0, 90.0, 90.0, 90.0, 90.0, 90.0]
     degrees_per_count: [0.06916, 0.06916, 0.06916, 0.06916, 0.06916, 0.06916]
     direction: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    position_offset_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    degree_min: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    degree_max: [180.0, 180.0, 180.0, 180.0, 270.0, 180.0]
     velocity_filter_alpha: 0.25

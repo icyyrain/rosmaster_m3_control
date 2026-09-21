@@ -1,0 +1,74 @@
+# M3 Pro control-board arm feedback experiment
+
+This directory contains a reviewable patch against Yahboom's official
+`Microros_Samples/Subscriber_uart_servo` STM32H743 example. It is deliberately
+kept separate from the downloaded vendor tree.
+
+## What the patch changes
+
+- reads the present-position register (`0x38`, two bytes) from one bus servo per
+  ROS task iteration;
+- publishes a six-joint sweep as `arm_msgs/msg/ArmJoints` on
+  `/arm6_joints_feedback`;
+- uses `ArmJoints.time` as a feedback sweep sequence number (`0..32767`), not as
+  a movement duration on the feedback topic;
+- retains `/arm_joint` and adds `/arm6_joints` command subscriptions;
+- fixes the official example's RX-header validation (`&&` to `||`);
+- selects blocking UART receive because the example enables interrupt receive
+  without implementing `HAL_UART_RxCpltCallback`;
+- fixes `Arm_Set_Snyc_Buffer`, which otherwise ignores all six input values.
+
+A failed or malformed servo read is published as `-1` for that joint. The
+Jetson bridge rejects invalid/range-violating readings and publishes `NaN` in
+the corresponding `sensor_msgs/msg/JointState.position` entry.
+
+## Base artifacts and integrity
+
+The vendor downloads are intentionally excluded from Git. Their expected
+SHA-256 values are in [SOURCE_HASHES.txt](SOURCE_HASHES.txt). The patch base is:
+
+`Board_Samples.zip/Microros_Samples/Subscriber_uart_servo`
+
+Apply from the extracted sample root:
+
+```bash
+git apply --check /path/to/0001-add-arm-position-feedback.patch
+git apply /path/to/0001-add-arm-position-feedback.patch
+```
+
+## Important deployment boundary
+
+This is based on Yahboom's *servo subscriber sample*, whose micro-ROS node is
+`YB_Example_Node`. It is not the complete factory `YB_Node` source. Flashing it
+would temporarily replace the factory control-board program and may remove
+chassis, odometry, IMU, battery and other factory functions.
+
+Do not flash this image merely because it compiles. First verify all of the
+following:
+
+1. The factory rollback HEX is present and its checksum matches
+   `SOURCE_HASHES.txt`.
+2. A working ST-LINK/CubeProgrammer recovery path is physically available.
+3. The robot is supported so the arm cannot collide with the chassis or desk.
+4. The sample is first tested with torque/motion risk controlled.
+
+The preferred production route is to obtain the factory `YB_Node` STM32 source
+from Yahboom and port the same small feedback loop into it. The sample build is
+useful as a hardware/protocol proof, not yet as the final robot firmware.
+
+## Expected ROS 2 interface
+
+With the patched test firmware and the serial micro-ROS agent running in domain
+30:
+
+```bash
+ros2 topic echo /arm6_joints_feedback arm_msgs/msg/ArmJoints
+ros2 topic hz /arm6_joints_feedback
+```
+
+The current one-servo-per-loop design should produce approximately 10–16 full
+six-joint sweeps per second. Measure the real rate before using it in a control
+loop. This is suitable for initial state-observation experiments, but a serious
+real-time RL controller will likely need higher-rate firmware and an on-robot
+policy process rather than a Windows/rosbridge round trip.
+

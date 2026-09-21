@@ -1,0 +1,153 @@
+diff --git a/APP/app_arm6.c b/APP/app_arm6.c
+--- a/APP/app_arm6.c
++++ b/APP/app_arm6.c
+@@ -75,9 +75,10 @@ static int Convert_Position_To_Angle(uint8_t id, int16_t pos)
+ void Arm_Set_Snyc_Buffer(uint16_t s1, uint16_t s2, uint16_t s3, uint16_t s4, uint16_t s5, uint16_t s6)
+ {
+-
++    uint16_t requested[MAX_SERVO_NUM] = {s1, s2, s3, s4, s5, s6};
+ 
+     for (int i = 0; i < 6; i++)
+     {
++        sync_servo[i] = requested[i];
+         if (sync_servo[i] > ARM_MAX_VALUE)
+         {
+             sync_servo[i] = MEDIAN_VALUE;
+diff --git a/APP/app_uart_servo.c b/APP/app_uart_servo.c
+--- a/APP/app_uart_servo.c
++++ b/APP/app_uart_servo.c
+@@ -5,7 +5,7 @@
+ 
+ 
+ #define ENABLE_USERVO_DEBUG      0
+-#define ENABLE_RX_INT            1
++#define ENABLE_RX_INT            0
+ 
+ 
+ static uint8_t g_rx_buff[MAX_RX_SIZE] = {0};
+@@ -137,7 +137,7 @@ static int16_t UartServo_Rx_Parse(uint8_t request_id, uint8_t* rx_data)
+     uint8_t s_id = rx_data[2];
+     uint8_t checknum = 0;
+     uint16_t read_value = 0;
+-    if (head1 != PTO_HEAD1 && head2 != PTO_HEAD2 && request_id != s_id) return -1;
++    if (head1 != PTO_HEAD1 || head2 != PTO_HEAD2 || request_id != s_id) return -1;
+     checknum = (~(rx_data[2] + rx_data[3] + rx_data[4] + rx_data[5] + rx_data[6])) & 0xFF;
+     if (checknum == rx_data[7])
+     {
+diff --git a/APP/ros2_handle.c b/APP/ros2_handle.c
+--- a/APP/ros2_handle.c
++++ b/APP/ros2_handle.c
+@@ -70,6 +70,10 @@ int ros_error = 0;
+ 
+ rcl_subscription_t uart_servo_subscriber;
+ arm_msgs__msg__ArmJoint uart_servo_msg;
++rcl_subscription_t arm6_subscriber;
++arm_msgs__msg__ArmJoints arm6_msg;
++rcl_publisher_t arm_feedback_publisher;
++arm_msgs__msg__ArmJoints arm_feedback_msg;
+ 
+ 
+ rcl_allocator_t allocator;
+@@ -92,6 +96,41 @@ uint32_t runtime_ms = 0;
+ uint32_t lasttime_ms = 0;
+ 
+ 
++static uint8_t feedback_joint_id = ARM_ID_1;
++static uint16_t feedback_sequence = 0;
++
++
++static void Arm_Feedback_Poll(void)
++{
++    int16_t angle = Arm_Get_Angle(feedback_joint_id);
++
++    switch (feedback_joint_id)
++    {
++        case ARM_ID_1: arm_feedback_msg.joint1 = angle; break;
++        case ARM_ID_2: arm_feedback_msg.joint2 = angle; break;
++        case ARM_ID_3: arm_feedback_msg.joint3 = angle; break;
++        case ARM_ID_4: arm_feedback_msg.joint4 = angle; break;
++        case ARM_ID_5: arm_feedback_msg.joint5 = angle; break;
++        case ARM_ID_6: arm_feedback_msg.joint6 = angle; break;
++        default: break;
++    }
++
++    feedback_joint_id++;
++    if (feedback_joint_id > ARM_ID_6)
++    {
++        /* ArmJoints has no header/sequence field. Reuse time as a monotonic
++         * sweep counter on this feedback-only topic; commands still keep their
++         * original duration semantics on /arm6_joints. */
++        arm_feedback_msg.time = (int16_t)(feedback_sequence++ & 0x7FFF);
++        if (rcl_publish(&arm_feedback_publisher, &arm_feedback_msg, NULL) != RCL_RET_OK)
++        {
++            printf("Failed to publish arm feedback.\n");
++        }
++        feedback_joint_id = ARM_ID_1;
++    }
++}
++
++
+ // 返回系统开机到当前的时间戳，单位为毫秒（ms）
+ int64_t get_millisecond(void)
+ {
+@@ -214,6 +253,20 @@ void uart_servo_Callback(const void *msgin)
+ }
+ 
+ 
++void arm6_Callback(const void *msgin)
++{
++    const arm_msgs__msg__ArmJoints * msg = (const arm_msgs__msg__ArmJoints *)msgin;
++    Arm_Set_Angle6(
++        msg->joint1,
++        msg->joint2,
++        msg->joint3,
++        msg->joint4,
++        msg->joint5,
++        msg->joint6,
++        msg->time);
++}
++
++
+ 
+ void Ros2_Handle_Task(void)
+ {
+@@ -250,6 +303,19 @@ void Ros2_Handle_Task(void)
+         ROSIDL_GET_MSG_TYPE_SUPPORT(arm_msgs, msg, ArmJoint),
+         "arm_joint"));
+ 
++    executor_count++;
++    RCCHECK(rclc_subscription_init_default(
++        &arm6_subscriber,
++        &node,
++        ROSIDL_GET_MSG_TYPE_SUPPORT(arm_msgs, msg, ArmJoints),
++        "arm6_joints"));
++
++    RCCHECK(rclc_publisher_init_best_effort(
++        &arm_feedback_publisher,
++        &node,
++        ROSIDL_GET_MSG_TYPE_SUPPORT(arm_msgs, msg, ArmJoints),
++        "arm6_joints_feedback"));
++
+     printf("executor_count:%d\n", executor_count);
+     executor = rclc_executor_get_zero_initialized_executor();
+     RCCHECK(rclc_executor_init(&executor, &support.context, executor_count, &allocator));
+@@ -262,11 +328,19 @@ void Ros2_Handle_Task(void)
+         &uart_servo_Callback,
+         ON_NEW_DATA));
+ 
++    RCCHECK(rclc_executor_add_subscription(
++        &executor,
++        &arm6_subscriber,
++        &arm6_msg,
++        &arm6_Callback,
++        ON_NEW_DATA));
++
+     LED_ROS_ON();
+     uint32_t lastWakeTime = xTaskGetTickCount();
+     while (ros_error < 3)
+     {
+         rclc_executor_spin_some(&executor, RCL_MS_TO_NS(ROS2_SPIN_TIMEOUT_MS));
++        Arm_Feedback_Poll();
+         if (ping_microros_agent() != RMW_RET_OK) break;
+         vTaskDelayUntil(&lastWakeTime, 10);
+         // vTaskDelay(pdMS_TO_TICKS(100));

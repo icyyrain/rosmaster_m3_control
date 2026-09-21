@@ -2,14 +2,15 @@
 
 This extension is deliberately separate from Yahboom's workspaces. The current
 stage provides message definitions, a state bridge, a fail-closed command mux,
-rosbridge launch files, and Windows clients. It does not contain or flash MCU
-firmware.
+rosbridge launch files, Windows clients, and a separately documented
+experimental MCU patch. Nothing has been flashed.
 
 ## Safety defaults
 
 - The command mux starts in `disabled` mode.
 - Real calibrated feedback is required before a control mode can be enabled.
-- Calibration starts with `calibration_valid: false`.
+- Raw-count fallback calibration starts with `calibration_valid: false`; the
+  default degree-feedback path still needs physical zero/direction validation.
 - The PC command utility is a dry run unless `--execute` is supplied and the
   operator types `MOVE`.
 - The existing joystick still publishes directly to `/arm6_joints`; do not run
@@ -37,8 +38,10 @@ source /home/jetson/m3pro_ext_ws/install/setup.bash
 ros2 launch m3pro_arm_bringup rosbridge.launch.py
 ```
 
-The arm stack can also be launched safely before MCU feedback exists. It will
-remain disabled and will not publish `/joint_states` while calibration is false:
+The arm stack can also be launched safely before MCU feedback exists. The
+command mux remains disabled; the bridge will wait for
+`/arm6_joints_feedback` and therefore publishes no `/joint_states` until real
+data arrives:
 
 ```bash
 ros2 launch m3pro_arm_bringup arm_stack.launch.py
@@ -59,15 +62,20 @@ python .\pc_client\monitor.py
 python .\pc_client\safe_command.py --joints 90 90 90 90 90 90 --time-ms 200
 ```
 
-## MCU work still required
+## MCU feedback prototype
 
-Locate the STM32 factory-firmware source containing `Arm_Set_Angle()` and add:
+`firmware/m3pro_arm_feedback` now contains a compile-checked patch against
+Yahboom's official `Subscriber_uart_servo` STM32H743 example. It:
 
-1. A UART3 position-query function for servo IDs 1 through 6.
-2. Response checksum and timeout handling.
-3. A bounded round-robin poller, initially at 10 Hz for all six joints.
-4. A micro-ROS publisher on `/arm/servo_states_raw` using
-   `m3pro_arm_msgs/msg/ArmServoState`.
+1. Queries UART3 present position for servo IDs 1 through 6.
+2. Checks response header, ID and checksum, with a two-millisecond timeout.
+3. Polls one joint per ROS task iteration.
+4. Publishes a completed sweep as `arm_msgs/msg/ArmJoints` on
+   `/arm6_joints_feedback`.
 
-After receiving raw data, calibrate each joint independently and only then set
-`calibration_valid: true` in `arm_bridge.yaml`.
+Do not treat the compiled sample as production firmware: it is not the complete
+factory `YB_Node`. Obtain the factory source and port the patch when possible.
+For a temporary hardware proof, first establish an ST-LINK recovery path and
+verify the downloaded factory rollback HEX checksum. After real readings arrive,
+validate each joint's direction, physical zero, usable limits, update
+`position_offset_deg`/`direction`, and only then enable command arbitration.

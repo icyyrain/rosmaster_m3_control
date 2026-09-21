@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='M3 Pro extension maintainers',
     maintainer_email='devnull@example.com',
-    description='Convert raw M3 Pro arm servo feedback to sensor_msgs/JointState.',
+    description='Convert M3 Pro arm servo feedback to sensor_msgs/JointState.',
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
