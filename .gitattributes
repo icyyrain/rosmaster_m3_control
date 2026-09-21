@@ -1,0 +1,5 @@
+# Firmware images must remain byte-for-byte identical to their recorded hashes.
+*.hex binary
+
+# Keep patches reproducible and directly applicable on Linux or Windows.
+*.patch text eol=lf
