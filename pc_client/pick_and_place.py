@@ -71,6 +71,7 @@ import numpy
 
 import arm_control
 import gripper_state
+import kinematics
 import reach_candy
 import table_plane
 
@@ -80,36 +81,26 @@ import table_plane
 GOAL_J2, GOAL_J3 = 18, 62
 
 CREEP_STEPS = 5
+ADAPTIVE_CREEP_STEPS = 12
+ADAPTIVE_MAX_JOINT_STEP = 1
+ALIGN_RETRIES = 2
+LOW_PROFILE_HEIGHT_MM = 26.0
+ACQUIRE_ATTEMPTS = 10
+MODEL_BIAS_LIMIT_MM = 25.0
+CLIPPED_TARGET_INSET_PX = 100.0
 
 # Where the gripper origin should end up, relative to the top of the object.
-# Anchored on the one grasp that worked: a 28 mm sweet was held when the creep
-# finished with the gripper origin 35-38 mm above the table, so the origin sits
-# roughly 8 mm above the object's top at a good grasp. One data point, so treat
-# it as a starting value rather than a calibration.
-#
-# It has to follow the object. Left fixed at the sweet's value, the descent
-# stopped 38.4 mm up while trying to grasp a 15.8 mm biscuit bar and closed the
-# jaws about 20 mm above it.
+# The legacy 8 mm offset held a 28 mm sweet. A 16 mm biscuit needed the guarded
+# 18 mm floor, effectively a 2 mm offset; 8 mm still left its jaws too high.
+# Keep the two empirical regimes separate so the proven sweet path is unchanged.
 GRASP_OFFSET_MM = 8.0
+LOW_PROFILE_GRASP_OFFSET_MM = 2.0
 HEIGHT_FLOOR_MM = 18.0          # absolute floor, whatever the object
 
-# How short an object this path can actually pick up. Empirical, and only two
-# points wide.
-#
-# An earlier version of this claimed a "reachable floor" of 38 mm, computed
-# from the lowest gripper height the descent ever reported. That was wrong: the
-# depth stream stops returning anything below about 120 mm of range, so the
-# height reading disappears while the arm is still descending. 38 mm was where
-# measurement stopped, not where motion stopped, and the check built on it
-# refused a sweet that had already been picked up twice.
-#
-# What is actually known: a 28 mm sweet was grasped successfully twice, and a
-# 15.9 mm biscuit bar failed twice, the creep running joint 2 out of travel
-# with the jaws closing about 20 mm above it. The true limit is somewhere
-# between, and finding it properly needs the FK goal re-solved per target,
-# which means carrying forward kinematics at run time.
+# Empirical lower bound. A 16 mm biscuit was picked up after the adaptive FK
+# controller was added. Lower objects remain untested and should still warn.
 PROVEN_GRASP_HEIGHT_MM = 28.0
-FAILED_GRASP_HEIGHT_MM = 15.9
+LOW_PROFILE_PROVEN_HEIGHT_MM = 16.0
 ALIGN_TOLERANCE_PX = 25.0
 GATE_PX = 170.0
 
@@ -263,12 +254,21 @@ def parse_args():
                         help='Shorthand for --descent-steps 10 --settle 0.6. '
                              'Roughly halves the run at some cost in '
                              'monitoring quality.')
+    parser.add_argument('--creep-controller', choices=('auto', 'legacy', 'adaptive'),
+                        default='auto',
+                        help='Final descent controller. auto preserves the proven '
+                             'legacy path for tall objects and uses online-calibrated '
+                             'forward kinematics below {:.0f} mm.'.format(
+                                 LOW_PROFILE_HEIGHT_MM))
     parser.add_argument('--skip-preflight', action='store_true',
                         help='Run anyway when a preflight check fails.')
-    parser.add_argument('--grasp-offset-mm', type=float, default=GRASP_OFFSET_MM,
+    parser.add_argument('--grasp-offset-mm', type=float,
                         help='Where to stop the gripper origin above the top of '
-                             'the object. Anchored on one successful grasp, so '
-                             'raise it if the jaws hit the table.')
+                             'the object. By default use {:.0f} mm for objects '
+                             'below {:.0f} mm and {:.0f} mm otherwise. Raise '
+                             'it if the jaws hit the table.'.format(
+                                 LOW_PROFILE_GRASP_OFFSET_MM,
+                                 LOW_PROFILE_HEIGHT_MM, GRASP_OFFSET_MM))
     parser.add_argument('--squeeze-mm', type=float, default=5.0,
                         help='How much narrower than the object to close. The '
                              'force knob; 5 mm held a sweet without marking it.')
@@ -313,13 +313,23 @@ class Session(object):
         self.colour = None          # resolved once a frame is available
         self.colour_chroma = None
         self.object_top_mm = None   # filled in by preflight
+        self.grasp_offset_mm = None
         self.stop_height_mm = HEIGHT_FLOOR_MM
+        self.object_aspect = None
+        self.lock_clipped_target = False
+        self.clipped_target_edge = None
+        self.acquired_object = None
 
     def set_object_top(self, top_mm):
         """Derive the descent stop height from the object's own height."""
         self.object_top_mm = top_mm
+        self.grasp_offset_mm = self.args.grasp_offset_mm
+        if self.grasp_offset_mm is None:
+            self.grasp_offset_mm = (LOW_PROFILE_GRASP_OFFSET_MM
+                                    if top_mm < LOW_PROFILE_HEIGHT_MM
+                                    else GRASP_OFFSET_MM)
         self.stop_height_mm = max(HEIGHT_FLOOR_MM,
-                                  top_mm + self.args.grasp_offset_mm)
+                                  top_mm + self.grasp_offset_mm)
 
     def close(self):
         self.streams.close()
@@ -385,8 +395,46 @@ class Session(object):
         cx, cy, area, rivals = found
         if area > MAX_PLAUSIBLE_AREA_PX:
             return None
+        observed = (cx, cy)
+        bounds = reach_candy.target_blob_bounds(
+            bgr, self.colour, observed, self.args.a_star - 128)
+        clipped = ()
+        if bounds is not None:
+            x, y, width, height = bounds
+            frame_height, frame_width = bgr.shape[:2]
+            clipped = tuple(edge for edge, touches in (
+                ('left', x <= 1), ('right', x + width >= frame_width - 1),
+                ('top', y <= 1), ('bottom', y + height >= frame_height - 1))
+                            if touches)
+        centre_locked = False
+        if (self.lock_clipped_target and predicted is not None
+                and self.clipped_target_edge is None and clipped):
+            for edge in ('bottom', 'top', 'right', 'left'):
+                if edge in clipped:
+                    self.clipped_target_edge = edge
+                    break
+        if (self.lock_clipped_target and predicted is not None
+                and self.clipped_target_edge is not None):
+            # The visible blue centroid becomes the serrated tail once the long
+            # wrapper leaves the bottom of the image.  Aim a little farther into
+            # the hidden body instead; aligning this virtual point with the
+            # gripper pulls the middle back under the jaws.  The offset stays
+            # inside the 170 px identity gate and is used only for the elongated
+            # depth-confirmed target.
+            if self.clipped_target_edge == 'bottom':
+                cy += CLIPPED_TARGET_INSET_PX
+            elif self.clipped_target_edge == 'top':
+                cy -= CLIPPED_TARGET_INSET_PX
+            elif self.clipped_target_edge == 'right':
+                cx += CLIPPED_TARGET_INSET_PX
+            elif self.clipped_target_edge == 'left':
+                cx -= CLIPPED_TARGET_INSET_PX
+            centre_locked = True
         return dict(cx=cx, cy=cy, area=area, rivals=rivals, width_mm=None,
-                    range_mm=reach_candy.target_range_mm(self.streams.depth(), (cx, cy)))
+                    range_mm=reach_candy.target_range_mm(
+                        self.streams.depth(), observed),
+                    observed_px=observed, bounds=bounds, clipped=clipped,
+                    centre_locked=centre_locked)
 
     def _look_table(self, predicted):
         """Depth for geometry, colour for identity.
@@ -400,6 +448,7 @@ class Session(object):
         chosen, total = self.pick_object(predicted)
         if chosen is None:
             return None
+        self.acquired_object = chosen
         return dict(cx=chosen['colour_px'][0], cy=chosen['colour_px'][1],
                     area=chosen['area_px'], rivals=total - 1,
                     width_mm=table_plane.grip_width_mm(chosen),
@@ -430,6 +479,15 @@ class Session(object):
         bgr = self.streams.colour()
         if bgr is None or self.colour is None or not objects:
             return objects
+        primary = reach_candy.find_target(
+            bgr, self.args.a_star, self.args.min_area, colour=self.colour)
+        if primary is not None:
+            near_primary = [item for item in objects
+                            if ((item['colour_px'][0] - primary[0]) ** 2
+                                + (item['colour_px'][1] - primary[1]) ** 2) ** 0.5
+                            <= 100.0]
+            if near_primary:
+                return near_primary
         _, projection = reach_candy.chroma_mask(bgr, self.colour, 0)
         threshold = self.args.a_star - 128
         keep = []
@@ -516,7 +574,13 @@ def preflight(session):
         check('colour resolved', False, str(error))
     check('depth stream', session.wait_for_depth(), 'frames arriving')
 
-    state = session.look()
+    state = None
+    for attempt in range(ACQUIRE_ATTEMPTS):
+        state = session.look()
+        if state is not None:
+            break
+        if attempt + 1 < ACQUIRE_ATTEMPTS:
+            time.sleep(0.25)
     check('target detected', state is not None,
           'none found with the {} detector'.format(args.detector)
           if state is None else
@@ -551,8 +615,12 @@ def preflight(session):
                   '{:.0f} mm against {:.0f}-{:.0f} mm; the FK descent path was '
                   'solved at 265 mm'.format(range_mm, *REACH_BAND_MM))
 
-        graspable, _ = session.pick_object()
-        objects = table_plane.find_objects(session.streams.depth(), session.rng)
+        # Reuse the exact depth component that produced `state`. A second
+        # random plane fit on the next frame occasionally returns no objects
+        # and used to make an already-successful acquisition fail preflight.
+        graspable = session.acquired_object
+        if graspable is None:
+            graspable, _ = session.pick_object()
         if graspable is not None:
             measured = table_plane.grip_width_mm(graspable)
             check('object fits the jaws',
@@ -566,11 +634,16 @@ def preflight(session):
             if args.auto_width:
                 session.width_mm = measured
             session.set_object_top(graspable['top_mm'])
+            narrow = min(graspable['width_mm'], graspable['depth_mm'])
+            wide = max(graspable['width_mm'], graspable['depth_mm'])
+            session.object_aspect = wide / max(narrow, 1e-6)
             top = graspable['top_mm']
-            check('tall enough to grasp', top >= PROVEN_GRASP_HEIGHT_MM - 2.0,
-                  '{:.1f} mm; {:.0f} mm has been picked up, {:.1f} mm failed twice '
-                  'with the jaws closing above it'.format(
-                      top, PROVEN_GRASP_HEIGHT_MM, FAILED_GRASP_HEIGHT_MM),
+            check('grasp height calibrated',
+                  top >= LOW_PROFILE_PROVEN_HEIGHT_MM - 1.0,
+                  '{:.1f} mm; {:.0f} mm succeeded with the legacy path and '
+                  '{:.0f} mm succeeded with adaptive FK'.format(
+                      top, PROVEN_GRASP_HEIGHT_MM,
+                      LOW_PROFILE_PROVEN_HEIGHT_MM),
                   fatal=False)
 
             # Two independent measurements of the same object that ought to
@@ -579,7 +652,6 @@ def preflight(session):
             # ask for too tight a grip: the sweet measured 21 mm across but
             # 27 mm tall, and gripping it as 21 mm gives a 15 mm aperture.
             if args.auto_width:
-                narrow = min(graspable['width_mm'], graspable['depth_mm'])
                 check('width estimate consistent', abs(narrow - top) <= 0.5 * top,
                       'narrow axis {:.0f} mm, height {:.1f} mm, gripping as '
                       '{:.0f} mm; the mask only sees the cap of a rounded object '
@@ -589,7 +661,9 @@ def preflight(session):
             # the chosen detector against itself passes by construction and
             # tells us nothing, which is worse than having no check.
             bgr = session.streams.colour()
-            independent = (reach_candy.find_target(bgr, args.a_star, args.min_area)
+            independent = (reach_candy.find_target(
+                               bgr, args.a_star, args.min_area,
+                               colour=session.colour)
                            if bgr is not None else None)
             if independent is None:
                 check('colour can track it', False,
@@ -599,8 +673,8 @@ def preflight(session):
                       'tracker, which is not implemented.',
                       fatal=args.detector == 'table')
             else:
-                (dx, dy), _ = table_plane.preflight_offset(
-                    (independent[0], independent[1]), objects)
+                dx = independent[0] - graspable['colour_px'][0]
+                dy = independent[1] - graspable['colour_px'][1]
                 check('detectors agree', abs(dx) < 40 and abs(dy) < 40,
                       'independent colour fix differs from depth by '
                       '({:+.0f}, {:+.0f}) px'.format(dx, dy), fatal=False)
@@ -696,7 +770,7 @@ def descend(session, state):
     return state
 
 
-def creep(session, state):
+def creep_legacy(session, state):
     print('=== creep ===')
     for step in range(1, CREEP_STEPS + 1):
         j1, j4 = session.aligned_step(state, 0.5, 2.0)
@@ -728,7 +802,148 @@ def creep(session, state):
     return state
 
 
+def _update_model_bias(state, pose, previous):
+    """Calibrate model height from a real plane measurement when available."""
+    if state.get('height') is None:
+        return previous
+    observed = state['height'] - kinematics.gripper_height_mm(pose)
+    if abs(observed) > MODEL_BIAS_LIMIT_MM:
+        print('  WARNING: rejecting implausible FK height correction {:+.1f} mm'.format(
+            observed))
+        return previous
+    return observed
+
+
+def _look_adaptive(session, predicted, tries=3):
+    """Retry only the camera read; never issue another command while blind."""
+    for attempt in range(tries):
+        fresh = session.look(predicted)
+        if fresh is not None:
+            return fresh
+        if attempt + 1 < tries:
+            time.sleep(0.2)
+    return None
+
+
+def _recentre_adaptive(session, state):
+    """Bring the target back under the fixed gripper pixel after a height step."""
+    for _ in range(ALIGN_RETRIES):
+        error = session.error_px(state)
+        magnitude = (error[0] ** 2 + error[1] ** 2) ** 0.5
+        if magnitude <= ALIGN_TOLERANCE_PX:
+            break
+        j1, j4 = session.aligned_step(state, 0.6, 4.0)
+        if (j1, j4) == (session.pose[0], session.pose[3]):
+            break
+        pose = list(session.pose)
+        pose[0], pose[3] = j1, j4
+        predicted = reach_candy.predict_target(
+            session.last_px, (j1 - session.pose[0], 0, 0,
+                              j4 - session.pose[3]))
+        session.send(pose, 500, 1.0)
+        fresh = _look_adaptive(session, predicted)
+        if fresh is None:
+            print('     re-centre lost the target')
+            return None
+        state = fresh
+        error = session.error_px(state)
+        print('     re-centre {:<14} target {:>4.0f},{:<4.0f} |e| {:.0f}'.format(
+            str(session.pose[:4]), state['cx'], state['cy'],
+            (error[0] ** 2 + error[1] ** 2) ** 0.5))
+    return state
+
+
+def creep_adaptive(session, state):
+    """Approach a low object using FK calibrated by the live table plane.
+
+    The URDF gets the *change* in gripper height right, but its absolute table
+    offset moved by 7-9 mm between real runs.  Calibrating that offset at the
+    last pose where depth still works keeps the model useful inside the depth
+    camera's near blind zone without trusting an old global constant.
+    """
+    print('=== creep (adaptive) ===')
+    target = session.stop_height_mm
+    if state.get('height') is None:
+        print('  no measured height at the hand-off; refusing an uncalibrated descent')
+        return None
+
+    bias = _update_model_bias(state, session.pose, None)
+    if bias is None:
+        print('  could not calibrate FK height; refusing the low-profile descent')
+        return None
+    model = kinematics.gripper_height_mm(session.pose)
+    print('  aiming for {:.1f} mm; measured {:.1f}, model {:.1f}, correction {:+.1f}'.format(
+        target, state['height'], model, bias))
+
+    for step in range(1, ADAPTIVE_CREEP_STEPS + 1):
+        j1, j4 = session.aligned_step(state, 0.5, 2.0)
+        proposal = list(session.pose)
+        proposal[0], proposal[3] = j1, j4
+        model_target = target - bias
+        moved, modelled = kinematics.approach_height(
+            proposal, model_target, max_step=ADAPTIVE_MAX_JOINT_STEP)
+        corrected = modelled + bias
+        if moved is None:
+            print('  model cannot improve on {:.1f} mm towards {:.1f} mm'.format(
+                corrected, target))
+            return state if corrected <= target + 2.0 else None
+
+        delta = tuple(moved[i] - session.pose[i] for i in range(4))
+        predicted = reach_candy.predict_target(session.last_px, delta)
+        session.send(moved, 700, 1.4)
+        fresh = _look_adaptive(session, predicted)
+        if fresh is None:
+            print('  {:>2} {:<18} target lost; stopping before the grip'.format(
+                step, str(session.pose[:4])))
+            return None
+        state = fresh
+        bias = _update_model_bias(state, session.pose, bias)
+        corrected = kinematics.gripper_height_mm(session.pose) + bias
+        note = 'FK+cal {:.1f} mm'.format(corrected)
+        if state['height'] is not None:
+            note += ', measured {:.1f}'.format(state['height'])
+        print(row(step, session.pose, state, note))
+
+        state = _recentre_adaptive(session, state)
+        if state is None:
+            return None
+        bias = _update_model_bias(state, session.pose, bias)
+        corrected = kinematics.gripper_height_mm(session.pose) + bias
+        if state['height'] is not None and state['height'] < target - 2.0:
+            print('  measured {:.1f} mm, more than 2 mm below the guarded target; '
+                  'stopping without closing'.format(state['height']))
+            return None
+        measured_arrived = (state['height'] is not None
+                            and state['height'] <= target + 1.0)
+        model_arrived = state['height'] is None and corrected <= target + 1.0
+        if measured_arrived or model_arrived:
+            source = 'measurement' if measured_arrived else 'calibrated model'
+            print('  arrived at {:.1f} mm by {}'.format(
+                state['height'] if measured_arrived else corrected, source))
+            return state
+
+    print('  adaptive creep exhausted {} guarded steps before reaching {:.1f} mm'.format(
+        ADAPTIVE_CREEP_STEPS, target))
+    return None
+
+
+def creep(session, state):
+    controller = session.args.creep_controller
+    if controller == 'auto':
+        controller = ('adaptive'
+                      if (session.object_top_mm is not None
+                          and session.object_top_mm < LOW_PROFILE_HEIGHT_MM)
+                      else 'legacy')
+    print('creep controller: {}'.format(controller))
+    if controller == 'legacy':
+        return creep_legacy(session, state)
+    return creep_adaptive(session, state)
+
+
 def grip(session, state):
+    # From here on verification needs the observed colour movement, not the
+    # approach anchor used to keep an elongated object's physical centre.
+    session.lock_clipped_target = False
     command = gripper_state.grip_command(session.width_mm, session.args.squeeze_mm)
     print('=== grip ===')
     print('  object {:.0f} mm, squeeze {:.0f} mm -> aperture {:.1f} mm, joint6 {}'.format(
@@ -827,6 +1042,15 @@ def main():
         if not preflight(session):
             print('\nnot moving. Fix the failures, or pass --skip-preflight.')
             return 1
+        session.lock_clipped_target = (
+            args.detector == 'table'
+            and session.object_aspect is not None
+            and session.object_aspect >= 1.8)
+        if session.lock_clipped_target:
+            print('tracking {:.0f} px in from the visible end of the elongated '
+                  'target (aspect {:.1f}:1)'.format(
+                      CLIPPED_TARGET_INSET_PX,
+                      session.object_aspect))
         print()
 
         state = align(session)
@@ -837,6 +1061,12 @@ def main():
         if state is None:
             return 1
         state = creep(session, state)
+        if state is None:
+            print('\nadaptive descent stopped safely; not closing the jaws')
+            session.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS,
+                         arm_control.HOMING_TIME_MS / 1000.0 + 1.0)
+            print('home. final pose {}'.format(session.pose))
+            return 1
         state = grip(session, state)
 
         print('=== lift and verify ===')

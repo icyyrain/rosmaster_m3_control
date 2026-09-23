@@ -226,13 +226,21 @@ def find_objects(depth, rng, min_height=OBJECT_MIN_HEIGHT_MM,
         distance = float(numpy.median(depth[blob]))
         if not NEAR_MM < distance < FAR_MM:
             continue
-        width_px = int(stats[label, cv2.CC_STAT_WIDTH])
-        depth_px = int(stats[label, cv2.CC_STAT_HEIGHT])
+        # Axis-aligned dimensions inflate as soon as a long package is placed
+        # diagonally: the biscuit's short side jumped from 31 to 47 mm after a
+        # failed grasp rotated it.  Measure the minimum-area rectangle instead,
+        # so jaw aperture follows the physical sides rather than image axes.
+        rows, columns = numpy.nonzero(blob)
+        rectangle = cv2.minAreaRect(
+            numpy.column_stack((columns, rows)).astype(numpy.float32))
+        side_a_px, side_b_px = rectangle[1]
+        pixel_scale = distance / ((FX_DEPTH + FY_DEPTH) * 0.5)
         cx, cy = centroids[label]
         found.append(dict(
             area_px=area,
-            width_mm=width_px * distance / FX_DEPTH,
-            depth_mm=depth_px * distance / FY_DEPTH,
+            width_mm=side_a_px * pixel_scale,
+            depth_mm=side_b_px * pixel_scale,
+            angle_deg=float(rectangle[2]),
             top_mm=float(numpy.nanpercentile(heights[blob], 95)),
             dist_mm=distance,
             depth_px=(cx, cy),

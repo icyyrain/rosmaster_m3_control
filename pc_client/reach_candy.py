@@ -344,6 +344,27 @@ def find_target(bgr, a_star, min_area, previous=None, max_jump=120.0,
     return cx, cy, area, rivals
 
 
+def target_blob_bounds(bgr, colour, target_px, threshold=DEFAULT_CHROMA):
+    """Bounding box of the colour component nearest ``target_px``.
+
+    The box lets a caller notice that a long object has run out of the image.
+    Its visible-pixel centroid is no longer the physical object centre once
+    that happens, even though it remains a perfectly good identity check.
+    """
+    mask, _ = chroma_mask(bgr, colour, threshold)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, numpy.ones((5, 5), numpy.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, numpy.ones((9, 9), numpy.uint8))
+    count, _, stats, centroids = cv2.connectedComponentsWithStats(
+        mask, connectivity=8)
+    if count < 2:
+        return None
+    candidates = range(1, count)
+    label = min(candidates, key=lambda item: (
+        (centroids[item][0] - target_px[0]) ** 2
+        + (centroids[item][1] - target_px[1]) ** 2))
+    return tuple(int(value) for value in stats[label, :4])
+
+
 def target_range_mm(depth, colour_px, search=30):
     """Range to the target in mm, or None.
 
