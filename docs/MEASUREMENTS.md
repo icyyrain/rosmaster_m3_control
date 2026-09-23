@@ -361,6 +361,60 @@ Closing that gap is a third degree of freedom, and the range floor
 and carries the gripper toward the table. The approach stage is not
 implemented.
 
+## Reading the gripper from the camera
+
+The gripper's angle cannot be recovered the way joints 1-4 can, since it does
+not move the camera. It is nonetheless plainly visible: the two jaws are dark
+shapes along the bottom of the frame near x 490 and x 930, either side of the
+fixed gripper pixel, and that position does not shift when joints 1-4 move.
+
+So it can be measured directly. `pc_client/gripper_state.py` does this.
+
+### Which feature works
+
+The gap between the outermost dark regions in the strip does **not** work: it
+correlates only +0.46 with the command, because the strip also contains a
+keyboard edge, cables and shadows, giving three to seven dark blobs whose
+extremes jump around.
+
+Dark **area** in the strip does work:
+
+| | |
+| --- | --- |
+| correlation with command, 30-120 band | **+0.962** |
+| sensitivity | **+97 px per degree** |
+| above 120 | saturates, jaws fully in view |
+| hysteresis, closing against opening | 8-14% |
+
+The hysteresis matches the backlash the arm joints show, so a reading is always
+approached from the same direction.
+
+### Grasp detection
+
+Absolute area depends on the strip's background and therefore shifts whenever
+the arm moves. The robust quantity is the difference at one pose, where the
+background cancels:
+
+```text
+grasp_signal = area(closed) - area(open)
+```
+
+On air, six cycles at one pose:
+
+| state | mean | sd | range |
+| --- | --- | --- | --- |
+| open at 30 | 5927 px | 16 px | 45 px |
+| closed at 120 | 13714 px | 9 px | 28 px |
+| signal | 7786 px | 9 px | |
+
+**Repeatability is 9 px, which is 0.09 degrees of jaw travel.** A three-sigma
+deviation is 0.28 degrees. A sweet is tens of degrees thick, so grasp
+detection has an enormous margin.
+
+A later probe at the same pose in different light gave open 5628 px and closed
+13420 px, both shifted by roughly 300 px, while the signal came out at 7798 px
+against the stored 7786. The background really does cancel.
+
 ## What this means for reinforcement learning
 
 Usable today, without touching the firmware, for **visual servoing**: the
@@ -369,12 +423,11 @@ accurately, the camera sees the result. The loop closes without joint angles.
 
 Not usable for:
 
-- **Joint 5 angle and gripper opening angle**, which cannot be inferred from
-  the image transform. Grasp *confirmation* is a different matter and looks
-  feasible: the gripper is visible along the bottom of the frame, so the jaws
-  and whatever sits between them can be inspected directly. An earlier
-  revision of this file called grasp confirmation impossible, which conflated
-  "does not move the camera" with "cannot be seen".
+- **Joint 5's angle**, which nothing here observes.
+  The gripper's opening, however, now *is* measured, from dark area in a fixed
+  strip at the bottom of the frame; see the section above. An earlier revision
+  of this file called grasp confirmation impossible, which conflated "does not
+  move the camera" with "cannot be seen".
 - **Stall and collision detection**, which needs servo feedback. Safety stays
   a human-in-the-loop matter, and `m3pro_arm_safety` should keep
   `require_feedback: true`.

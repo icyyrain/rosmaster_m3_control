@@ -284,7 +284,37 @@ python .\pc_client\reach_candy.py --home --execute
 在约 112 mm 处。`--min-range`（默认 180 mm）会在测距低于阈值时中止，因为对齐动作
 会让手腕下俯、把夹爪带向桌面。
 
-### 7. 机械臂命令
+### 7. 夹爪的摄像头读数与抓取检测
+
+夹爪的**角度**推不出来（它不驱动相机），但它**本体在画面里看得见** —— 两指是底部
+的暗色形状，位置固定。所以直接量：
+
+```powershell
+python .\pc_client\gripper_state.py --mode read
+python .\pc_client\gripper_state.py --mode probe --assume-pose 90 120 0 23 90 90 --execute
+python .\pc_client\gripper_state.py --mode sweep --assume-pose 90 120 0 23 90 90 --execute
+```
+
+特征用固定条带内的**暗像素面积**，不能用两指开口宽度（后者相关性只有 +0.46，因为
+条带里还有键盘边和线缆）：
+
+| 项目 | 实测 |
+| --- | --- |
+| 30–120° 区间相关性 | **+0.962** |
+| 灵敏度 | **+97 px/度** |
+| 120° 以上 | 饱和 |
+| 同指令回差 | 8–14%（故读数一律同向逼近） |
+
+绝对面积受背景影响，机械臂一动就会偏。稳健量是同姿态下的差值，背景自动抵消：
+
+```text
+grasp_signal = area(闭合) - area(张开)
+```
+
+夹空时为 **7786 px，标准差 9 px（= 0.09° 行程）**，3σ 可分辨 **0.28°**。一颗糖厚达
+几十度，信噪比极大。换姿态后先空夹一次重新取参考值即可。
+
+### 8. 机械臂命令
 
 原厂命令格式如下，执行后机械臂会真实运动：
 
@@ -410,6 +440,7 @@ python .\pc_client\safe_command.py --joints 90 90 90 90 90 90 --time-ms 200
   - `vision_metrology.py`：以场景为参考的差分图像位移测量，精度高一个量级。
   - `arm_diagnostics.py`：机械臂特性测量（会让机械臂运动）。
   - `reach_candy.py`：视觉伺服闭环，把红色目标对准夹爪，默认 dry-run。
+  - `gripper_state.py`：从摄像头读夹爪开合并判断是否夹到东西。
 - `docs/MEASUREMENTS.md`：相机与机械臂的实测数据、方法学陷阱和对强化学习的结论。
 - `docs/IMPLEMENTATION_PLAN.md`：架构、构建步骤和安全约束。
 - `firmware/m3pro_arm_feedback`：官方 STM32 示例的反馈补丁、校验值和实验 HEX。
