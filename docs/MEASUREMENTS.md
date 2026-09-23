@@ -269,6 +269,98 @@ prefer differential measurement wherever the task allows it.
 The camera itself: colour 1280x720 at 29.5 fps over rosbridge, 3.1 MB/s; depth
 640x360 at 9.7 fps; IR 640x400 at 10 fps.
 
+## Visual servoing, closed on hardware
+
+`pc_client/reach_candy.py` drives a red target under the gripper with vision
+only: no learning, no joint feedback, no inverse kinematics.
+
+### The gripper projects to a fixed pixel
+
+This is what makes the loop cheap. The camera is on arm4 and the gripper on
+arm5, and joint 5 turns about an axis nearly collinear with the offset to the
+gripper, so the gripper origin moves at most 0.88 mm through a full revolution.
+It should therefore land on the same pixel whatever joints 1-4 do.
+
+Measured by toggling the gripper through three open/close cycles at four very
+different poses and keeping only the pixels that changed in *every* cycle:
+
+| pose | consistent px | single-cycle px | centroid | bbox |
+| --- | --- | --- | --- | --- |
+| home | 11940 | 13248, 13159, 27187 | 706.3, 679.1 | 156x91 |
+| joint1 +12 | 11671 | 77529, 12024, 12044 | 706.2, 679.0 | 154x92 |
+| joint2 +12, joint3 +15 | 12152 | 98741, 21314, 46610 | 708.7, 678.6 | 158x91 |
+| joint4 +20 | 11228 | 20871, 26203, 26438 | 706.4, 681.4 | 157x92 |
+
+**`GRIPPER_PX = (707, 680)`, spread 2.6 x 2.8 px across all four poses.** The
+loop never has to detect the gripper.
+
+The single-cycle column is why lock-in was necessary. A first attempt
+differenced one open frame against one closed frame and returned regions of
+13k-75k px on the right of the image, where a person sits; only one of its four
+poses found the gripper. Requiring agreement across cycles rejected 85-90% of
+that contamination, because motion in the room is uncorrelated with the
+command while the gripper is perfectly correlated with it.
+
+### Detecting the target
+
+Threshold the Lab **a\*** channel, not HSV hue. The wrapper is dark (L about
+47) and hue is unstable at low lightness: the target's median hue fell three
+degrees outside a 170-179 red band and only 105 px passed.
+
+| method | target px | rival regions | largest rival |
+| --- | --- | --- | --- |
+| HSV 170-179 | 105 | 0 | 0 |
+| HSV 160-179 widened | 1048 | 4 | 504 |
+| **Lab a\* > 140** | **938** | **0** | **0** |
+| Lab a\* > 145 | 305 | 0 | 0 |
+
+The target's a\* is 141 while the whole frame's median is 129 and its 99.5th
+percentile is 138, so a threshold of 140 sits in a clean gap.
+
+Largest-blob selection is still not enough. Skin also sits high on a\*, so a
+hand in frame produces rivals, and on one run a rival briefly grew larger than
+the target: the fix jumped 539 px across the image and the loop issued a 3
+degree command from it before recovering. The detector now accepts only blobs
+within 120 px of the previous fix, and returns nothing rather than steering
+from a bad one.
+
+### The gripper cannot be found in depth
+
+Checked because locating both target and gripper in one image space would
+avoid the unregistered depth stream. At the gripper's known colour position the
+height above the fitted table plane is 0.6, -0.7 and 0.6 mm at its centre and
+two jaws: the depth sensor returns the **table** there, not the gripper.
+A first version of this test toggled the jaws and looked for depth changes over
+8 mm, but the jaws move across the line of sight so their distance barely
+changes; it reported a region in the top-right corner at 1102 mm and wrongly
+declared success.
+
+So the gripper is located in colour, as a constant, and depth is used only for
+range.
+
+### Result
+
+From home, gain 0.35, step limit 3 degrees, tolerance 25 px:
+
+| step | target px | error px | range |
+| --- | --- | --- | --- |
+| 1 | 713, 323 | 6, -357 | 303 mm |
+| 4 | 716, 445 | 9, -235 | 309 mm |
+| 7 | 714, 582 | 7, -98 | 306 mm |
+| 10 | 718, 659 | aligned | 299 mm |
+
+**Converged in 10 steps**, monotonically, with rivals present throughout and
+correctly rejected. Final pose `[90, 120, 0, 23, 90, 90]`: joint 4 finished at
+23 degrees where the Jacobian predicted 24, and joint 1 never moved. Two runs
+ended at the same joint 4 value.
+
+Alignment is not contact. The target ends on the line through the gripper but
+still 299 mm from the camera, while the gripper sits about 112 mm from it.
+Closing that gap is a third degree of freedom, and the range floor
+(`--min-range`, default 180 mm) exists because aligning tilts the wrist down
+and carries the gripper toward the table. The approach stage is not
+implemented.
+
 ## What this means for reinforcement learning
 
 Usable today, without touching the firmware, for **visual servoing**: the

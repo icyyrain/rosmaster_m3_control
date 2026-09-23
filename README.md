@@ -259,7 +259,32 @@ python .\pc_client\arm_diagnostics.py --test hold       # 到位后是否抖动
 确认抓取成功）和 2–3 Hz 的控制上限，两者都有不拆机的解法。详见
 `docs/MEASUREMENTS.md` 末节。
 
-### 6. 机械臂命令
+### 6. 视觉伺服闭环
+
+`pc_client/reach_candy.py` 用纯视觉把一个红色目标对准到夹爪下方 —— 不用学习、
+不用关节反馈、不用逆运动学。默认 dry-run：
+
+```powershell
+python .\pc_client\reach_candy.py --home
+python .\pc_client\reach_candy.py --home --execute
+```
+
+它依赖三个实测常量（全部记录在 `docs/MEASUREMENTS.md`）：
+
+- **夹爪的图像位置是常数** `(707, 680)`，四个差异很大的姿态下极差仅 2.6×2.8 px。
+  因为相机在 `arm4`、夹爪在 `arm5`，而关节 5 的转轴几乎与到夹爪的偏移共线，
+  转一整圈只让夹爪移动 0.88 mm。所以闭环**不需要检测夹爪**。
+- **目标用 Lab 的 a\* 通道检出**，不用 HSV 色相 —— 包装很暗（L≈47），低亮度下色相
+  不稳定。a\* > 140 时目标有 938 px 且零误检。
+- **图像雅可比**，只用关节 1 和 4（条件数 1.2）。
+
+实测从 home 出发 **10 步收敛**，关节 4 停在 23°（雅可比预测 24°），两轮可复现。
+
+注意对齐**不等于接触**：目标最终落在穿过夹爪的视线上，但仍距相机 299 mm，而夹爪
+在约 112 mm 处。`--min-range`（默认 180 mm）会在测距低于阈值时中止，因为对齐动作
+会让手腕下俯、把夹爪带向桌面。
+
+### 7. 机械臂命令
 
 原厂命令格式如下，执行后机械臂会真实运动：
 
@@ -384,6 +409,7 @@ python .\pc_client\safe_command.py --joints 90 90 90 90 90 90 --time-ms 200
   - `visual_state.py`：从固定 AprilTag 解算相机绝对位姿，含噪声统计。
   - `vision_metrology.py`：以场景为参考的差分图像位移测量，精度高一个量级。
   - `arm_diagnostics.py`：机械臂特性测量（会让机械臂运动）。
+  - `reach_candy.py`：视觉伺服闭环，把红色目标对准夹爪，默认 dry-run。
 - `docs/MEASUREMENTS.md`：相机与机械臂的实测数据、方法学陷阱和对强化学习的结论。
 - `docs/IMPLEMENTATION_PLAN.md`：架构、构建步骤和安全约束。
 - `firmware/m3pro_arm_feedback`：官方 STM32 示例的反馈补丁、校验值和实验 HEX。
