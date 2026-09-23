@@ -545,6 +545,76 @@ jaws closed on nothing, leaving them open.
 
 Still to test: the positive case, which needs an object between the jaws.
 
+## Jaw aperture, and how to set grip force
+
+The first successful pick flattened the sweet, because the clamp was commanded
+to 180. The second attempt commanded 120 instead and failed to hold anything.
+Both failures have the same root cause, which is that 120 was being treated as
+"closed" when it is not.
+
+The aperture was therefore measured against the command, by tracking the two
+jaws as the two largest dark regions across the full frame width:
+
+| joint6 | 90 | 100 | 110 | 120 | 130 | 140 | 150 | 160 | 170 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| gap mm | 71.7 | 66.0 | 60.0 | **53.8** | 46.8 | 39.3 | 31.3 | **24.1** | 15.9 |
+
+Linear, **0.701 mm per degree**. At 180 the two jaws merge and cannot be told
+apart optically, so the fit is not extrapolated past 175.
+
+So at 120 the jaws are still **54 mm apart** and never touch a 25 mm sweet,
+while 180 closes past 14 mm and compresses it by nearly half. Inverting the
+fit:
+
+| aperture wanted | joint6 |
+| --- | --- |
+| 30 mm | 152 |
+| 25 mm | 159 |
+| 20 mm | 166 |
+| 15 mm | 173 |
+
+`gripper_state.grip_command(width_mm, squeeze_mm)` does this. Force is set by
+`squeeze_mm`, since there is nothing else to set it with.
+
+### This also rules the optical contact search out
+
+A 25 mm object first meets the jaws near 159 degrees. The dark-area readout
+saturates near 110, because by then the jaws are simply fully in view. Contact
+happens where the signal has already stopped responding, so no amount of
+tuning makes that search work for objects in this size range. It is not merely
+fragile; it is looking in the wrong half of the travel.
+
+The readout had already failed in five other ways: a pose-dependent visible
+band, a pose-dependent rate, saturation being indistinguishable from a
+blockage, contamination by whatever is held between the jaws, and the jaws
+leaving the frame entirely below about 70 degrees. A sixth: two static dark
+blobs at the frame edges, the monitor bezel at x=73 and a chair at x=1194, are
+larger than the jaws and win any "two largest regions" contest unless excluded
+by position.
+
+### Second pick, gently
+
+With the clamp at 162, an aperture of 23 mm, the same sequence ran again and
+the wrapper came back intact.
+
+| lift step | target moved | if stationary |
+| --- | --- | --- |
+| [93, 33, 53] | 7 px | 108 px |
+| [93, 54, 40] | 2 px | 81 px |
+| [93, 90, 20] | 3 px | 175 px |
+
+And the set-down, which is the same test inverted:
+
+| stage | target moved | if stationary |
+| --- | --- | --- |
+| lowering, still clamped | 2, 3, 3, 4 px | 175, 81, 41, 21 px |
+| jaws opened | jumped (680, 662) to (631, 643) | - |
+| retracting, released | 14 px from prediction | then off-frame as predicted |
+
+The kinematic test is the one to trust for confirmation. It needs no
+calibration that can drift, only the Jacobian, and it gave a margin of one to
+two orders of magnitude in both directions.
+
 ## What this means for reinforcement learning
 
 Usable today, without touching the firmware, for **visual servoing**: the

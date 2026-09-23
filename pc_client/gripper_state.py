@@ -22,12 +22,20 @@ and the saturation angle all have to be measured where the work happens, with
 `characterise`; an earlier version that trusted one global constant read the
 flat zero as a blockage and reported a firm grip on empty jaws.
 
-Two things follow for grip force. There is no force or current feedback on this
-arm at all: ArmJoints carries angles only, so a servo told to reach 180 on an
-object that stops it at 120 keeps pushing with its stall torque, which is how a
-chocolate gets crushed. Force is therefore set by how far past contact the
-command goes, and contact is found optically: free jaws move the dark area at a
-measurable rate, blocked jaws stop moving while the command keeps rising.
+Grip force is handled a different way, and not by that readout. There is no
+force or current feedback on this arm at all: ArmJoints carries angles only, so
+a servo told to reach 180 on an object that stops it earlier keeps pushing with
+its stall torque, which is how a chocolate gets crushed. The only control
+available is where to stop the command, so the jaw aperture was measured
+against the command directly, giving 0.701 mm per degree, and `grip_command`
+inverts that for an object of known width. Verified on hardware: a 25-28 mm
+sweet held at 162, wrapper intact, through a full lift and set-down.
+
+A contact search using the dark-area readout is also here, but it cannot work
+for objects this size. A 25 mm object first meets the jaws near 159 degrees,
+while the readout saturates around 110 because the jaws are simply fully in
+view by then. Contact happens where the signal has already stopped responding.
+Treat `close_until_contact` as a diagnostic only.
 
 For grasp detection the robust quantity is the difference between closed and
 open at one pose, where the strip's background cancels:
@@ -57,7 +65,25 @@ STRIP = dict(y0=665, y1=720, x0=400, x1=1020)
 DARK_LEVEL = 80
 
 OPEN_CMD = 30
+
+# CLOSED_CMD is a misnomer kept for the readout band only. At 120 the jaws are
+# still 53.8 mm apart: barely half way through their travel. Treating it as
+# "closed" is why a 120 clamp failed to hold a 25 mm sweet while a 180 clamp
+# flattened one.
 CLOSED_CMD = 120
+
+# Jaw aperture against command, measured directly by tracking the two jaws as
+# the two largest dark regions across the full frame width:
+#
+#   joint6   90   100   110   120   130   140   150   160   170
+#   gap mm 71.7  66.0  60.0  53.8  46.8  39.3  31.3  24.1  15.9
+#
+# Linear at 0.701 mm per degree. At 180 the two jaws merge and cannot be
+# separated optically, so the fit is not extrapolated past 175.
+GAP_SLOPE_PX_PER_DEG = -4.51
+GAP_INTERCEPT_PX = 878.4
+MM_PER_PX = 112.0 / 720.501      # at the jaws' 112 mm distance from the camera
+MAX_GRIP_CMD = 175
 
 # Measured at pose [90, 120, 0, 23] only. Use characterise() at the working
 # pose rather than trusting this.
@@ -84,7 +110,7 @@ def parse_args():
                              'sweep: print area against command. '
                              'calibrate: sweep EMPTY jaws to find the band, rate '
                              'and saturation angle. '
-                             'grip: close in steps and stop at contact plus a margin.')
+                             'grip: hold an object of --width-mm using the measured aperture calibration.')
     parser.add_argument('--assume-pose', type=int, nargs=6,
                         metavar=('J1', 'J2', 'J3', 'J4', 'J5', 'J6'),
                         help='Required for every mode that moves: the arm pose to '
@@ -93,9 +119,13 @@ def parse_args():
                         help='probe: how many open/close cycles to average.')
     parser.add_argument('--grip-step', type=int, default=5,
                         help='degrees per increment for calibrate and grip.')
+    parser.add_argument('--width-mm', type=float, default=0.0,
+                        help='grip: width of the object in mm. Required.')
+    parser.add_argument('--squeeze-mm', type=float, default=3.0,
+                        help='grip: how much narrower than the object to close. '
+                             'This is the force knob; larger squeezes harder.')
     parser.add_argument('--grip-margin', type=int, default=8,
-                        help='grip: degrees commanded past contact. This is the '
-                             'force knob; larger squeezes harder.')
+                        help='unused by grip; kept for the contact-search diagnostic.')
     parser.add_argument('--contact-frac', type=float, default=0.35,
                         help='grip: an increment below this fraction of the free '
                              'rate counts as contact.')
@@ -109,6 +139,34 @@ def parse_args():
     parser.add_argument('--execute', action='store_true',
                         help='Required for every mode that moves the gripper.')
     return parser.parse_args()
+
+
+def gap_mm(angle):
+    """Jaw aperture in mm for a joint 6 command, from the measured fit."""
+    return (GAP_SLOPE_PX_PER_DEG * angle + GAP_INTERCEPT_PX) * MM_PER_PX
+
+
+def angle_for_gap(target_mm):
+    """Joint 6 command that gives a given aperture."""
+    px = target_mm / MM_PER_PX
+    return (px - GAP_INTERCEPT_PX) / GAP_SLOPE_PX_PER_DEG
+
+
+def grip_command(width_mm, squeeze_mm=3.0):
+    """Command that holds an object of this width without crushing it.
+
+    This is the reliable way to set grip force on this arm. The servo has no
+    force or current feedback, so force is whatever it applies while trying to
+    reach the commanded angle; the only control available is to stop the
+    command at an aperture slightly smaller than the object.
+
+    Verified: a 25-28 mm sweet at 162, an aperture of about 23 mm, was held
+    through a full lift and set down again with its wrapper intact. The same
+    sweet at 180, an aperture under 16 mm, was flattened, and at 120, an
+    aperture of 54 mm, was not touched at all.
+    """
+    angle = angle_for_gap(max(1.0, width_mm - squeeze_mm))
+    return int(round(min(MAX_GRIP_CMD, max(OPEN_CMD, angle))))
 
 
 def dark_area(gray):
@@ -351,30 +409,26 @@ def main():
             return 0
 
         if args.mode == 'grip':
-            print()
-            baseline = None
-            if args.ceiling:
-                baseline = dict(visible_from=args.visible_from,
-                                rate_px_per_deg=args.free_rate,
-                                ceiling=args.ceiling)
-            else:
-                print('no --ceiling given, so saturation cannot be told from contact.')
-                print('Run --mode calibrate on empty jaws first.')
-                print()
-            outcome = close_until_contact(
-                link, streams, pose, args.grip_step, args.grip_margin,
-                args.contact_frac, baseline)
-            if outcome is None:
-                print('no usable readings')
+            if not args.width_mm:
+                print('\n--mode grip needs --width-mm: the object width in mm.')
+                print('Measure it, or read it off the depth segmentation.')
                 return 1
+            command = grip_command(args.width_mm, args.squeeze_mm)
             print()
-            if outcome['contact'] is None:
-                print('left open; nothing gripped.')
-            else:
-                print('holding at joint6 = {}. Raise --grip-margin to squeeze'.format(
-                    outcome['commanded']))
-                print('harder, lower it for a gentler hold. Commanding 180 is what')
-                print('crushes things.')
+            print('object {:.0f} mm, squeezing {:.0f} mm -> aperture {:.1f} mm'.format(
+                args.width_mm, args.squeeze_mm, args.width_mm - args.squeeze_mm))
+            print('joint6 = {} (aperture there is {:.1f} mm)'.format(
+                command, gap_mm(command)))
+            print()
+            print('for reference: 120 leaves {:.0f} mm and grips nothing;'.format(
+                gap_mm(120)))
+            print('180 closes past {:.0f} mm and crushes soft objects.'.format(
+                gap_mm(MAX_GRIP_CMD)))
+            set_gripper(link, pose, command, settle=2.5)
+            print()
+            print('holding at joint6 = {}. Confirm the grasp by lifting and'.format(command))
+            print('checking the object does not move in the image; the dark-area')
+            print('signal does not survive a change of pose.')
             return 0
 
         result = grasp_signal(link, streams, pose, args.cycles)
@@ -395,7 +449,7 @@ def main():
         print('  -> {}'.format(label))
         return 0
     finally:
-        if pose is not None and args.execute:
+        if pose is not None and args.execute and args.mode != 'grip':
             set_gripper(link, pose, 90, settle=1.2)
         streams.close()
         link.close()
