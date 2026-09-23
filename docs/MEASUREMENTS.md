@@ -647,6 +647,103 @@ the aligned pose, so a target at a very different distance needs it recomputed.
 And the descent ladder assumes the object sits on a flat table that the depth
 plane fit can find.
 
+## Generalising beyond the red sweet, and checking before moving
+
+Three things the first version of `pick_and_place.py` could not do: work on
+anything but a red object, tell you up front that a run would fail, or run any
+faster than one cautious waypoint at a time.
+
+### Detection is split, because geometry forces it
+
+`--detector table` fits the table plane and takes whatever stands proud of it.
+Colour-agnostic, and it measures real size, which the colour blob cannot: on the
+sweet it returned 29-30 mm against a true 28, where the a* mask read 11-19 mm
+because it only covers the sufficiently red part. `--auto-width` feeds that
+measurement to the grip calibration.
+
+Live comparison on the same sweet:
+
+| | position | measured width |
+| --- | --- | --- |
+| colour, a* > 140 | (723, 538) | 18.9 mm, a lower bound |
+| depth, table plane | (728, 545) | 29 mm |
+
+The two agree to within 10 px, so the depth-to-colour mapping is far better
+than the 33 px of parallax a 12 mm baseline would imply. Depth must be
+partly registered despite `depth_registration` reading false.
+
+**But the table detector cannot track.** Depth stops being usable below about
+120 mm and the gripper sits a fixed 111.9 mm from the camera, so *a held object
+is permanently inside the depth dead zone*. A run that tried to track with
+depth lost the target at the second creep step, gripped nothing, and could not
+verify anything:
+
+```text
+=== creep ===
+   1 [97, 15, 64, 17]   height   45.8 range   122 target  700,647
+   2 [97, 12, 66, 18]   target lost; stopping here
+=== lift and verify ===
+  [97, 33, 53, 18]      not found     697,728                --
+  -> not held during the lift
+```
+
+So `table` acquires and measures, then hands off to colour tracking, and
+preflight refuses the run when colour cannot see the object, because then
+nothing can track it through the grasp. A genuinely non-red object needs an
+appearance tracker, which is not implemented and is the honest gap here.
+
+### Preflight
+
+Eleven checks before anything moves, each printed with its evidence:
+
+```text
+  [pass] colour stream                frames arriving
+  [pass] depth stream                 frames arriving
+  [pass] target detected              at (728, 544), area 856
+  [warn] no rival detections          7 other candidate(s)
+  [pass] table plane found            gripper 175 mm above the table, 8496 inliers
+  [pass] target range known           257 mm
+  [pass] range within the solved band 257 mm against 200-340 mm
+  [pass] object fits the jaws         29 mm measured from depth, jaws take 8-60 mm
+  [pass] object stands off the table  27.8 mm tall
+  [pass] detectors agree              independent colour fix differs by (-5, +10) px
+  [pass] grip aperture sane           joint6 161 for a 29 mm object, aperture 23.7 mm
+```
+
+Two notes on what these do and do not prove. The range band is **not** a
+workspace check: a real one needs forward kinematics at run time, which this
+tool does not carry, so the band is simply the range the FK descent path was
+solved over. And the detector-agreement check deliberately uses an
+*independent* colour fix; an earlier version compared the chosen detector
+against itself and passed by construction, which is worse than no check.
+
+`--width-mm 200` fails it cleanly:
+
+```text
+  [FAIL] grip aperture sane           joint6 30 for a 200 mm object, aperture 115.5 mm
+  1 check(s) failed: grip aperture sane
+not moving. Fix the failures, or pass --skip-preflight.
+```
+
+### Speed
+
+`--descent-steps` and `--settle` are now parameters, with `--fast` as
+shorthand for 10 steps at 0.6x settling, which roughly halves the run. Verified
+end to end at that setting with the table detector and `--auto-width`: aligned
+in 5 steps, descended 10 waypoints from 184 to 55.4 mm, gripped at joint6 161
+for a 29 mm object, and both verdicts came out clean.
+
+| stage | target moved | if stationary |
+| --- | --- | --- |
+| lift | 16, 2, 4 px | 108, 81, 175 px |
+| lower, still held | 3, 4 px | 175, 81 px |
+| release | 109 px | 81 px, then out of frame |
+
+Fewer waypoints costs monitoring quality rather than accuracy: each step moves
+the image further, so the tracker has more to predict and the plane fit sees
+more motion blur. Below about 0.5x settling the arm is still moving when it is
+measured.
+
 ## What this means for reinforcement learning
 
 Usable today, without touching the firmware, for **visual servoing**: the

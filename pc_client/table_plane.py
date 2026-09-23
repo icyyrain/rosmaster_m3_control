@@ -162,3 +162,114 @@ def target_height(depth, rng, colour_px, search=30):
 def summarise(normal):
     """Tilt of the fitted plane from the camera's optical axis, in degrees."""
     return math.degrees(math.acos(min(1.0, abs(float(normal[2])))))
+
+
+# --- colour-agnostic object detection --------------------------------------
+#
+# Anything standing proud of the fitted plane is an object on the table. This
+# works on a blue biscuit wrapper as readily as a red sweet, which the a*
+# colour detector cannot: it found nothing on a blue wrapper.
+#
+# It also measures real size, unlike the colour blob. On the sweet it returned
+# 28 x 26 mm against a true 28 mm, where the a* mask gave 18 mm because it
+# only covers the sufficiently red part. That makes it the right source for
+# gripper_state.grip_command.
+#
+# The catch is the depth-to-colour mapping. depth_registration is off on this
+# driver, so the two sensors sit about 12 mm apart and a depth pixel maps to a
+# colour pixel only approximately. Halving the coordinates put the sweet within
+# 8 px at 302 mm, but the parallax grows as the object gets nearer, so
+# DEPTH_TO_COLOUR_SHIFT_PX exists to correct it and defaults to none because it
+# has not been calibrated. preflight_offset measures it whenever both detectors
+# can see the same object.
+
+OBJECT_MIN_HEIGHT_MM = 6.0
+OBJECT_MAX_HEIGHT_MM = 80.0
+OBJECT_MIN_AREA_PX = 40
+DEPTH_TO_COLOUR_SHIFT_PX = (0.0, 0.0)
+
+
+def find_objects(depth, rng, min_height=OBJECT_MIN_HEIGHT_MM,
+                 max_height=OBJECT_MAX_HEIGHT_MM, min_area=OBJECT_MIN_AREA_PX):
+    """Objects standing on the table, largest first.
+
+    Each entry carries its real size in mm, its height above the table, its
+    distance, and the colour pixel it maps to.
+    """
+    import cv2
+
+    if depth is None:
+        return []
+    plane = fit_plane(depth, rng)
+    if plane is None:
+        return []
+    normal, offset, _ = plane
+    points = to_points(depth)
+    valid = (depth > NEAR_MM) & (depth < FAR_MM)
+
+    heights = numpy.full(depth.shape, numpy.nan, numpy.float32)
+    heights[valid] = points[valid] @ normal + offset
+    if numpy.nanmedian(heights[valid]) < 0:
+        heights = -heights
+
+    mask = ((heights > min_height) & (heights < max_height)).astype(numpy.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, numpy.ones((3, 3), numpy.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, numpy.ones((5, 5), numpy.uint8))
+
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    found = []
+    for label in range(1, count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        blob = labels == label
+        distance = float(numpy.median(depth[blob]))
+        if not NEAR_MM < distance < FAR_MM:
+            continue
+        width_px = int(stats[label, cv2.CC_STAT_WIDTH])
+        depth_px = int(stats[label, cv2.CC_STAT_HEIGHT])
+        cx, cy = centroids[label]
+        found.append(dict(
+            area_px=area,
+            width_mm=width_px * distance / FX_DEPTH,
+            depth_mm=depth_px * distance / FY_DEPTH,
+            top_mm=float(numpy.nanpercentile(heights[blob], 95)),
+            dist_mm=distance,
+            depth_px=(cx, cy),
+            colour_px=(cx * 2.0 + DEPTH_TO_COLOUR_SHIFT_PX[0],
+                       cy * 2.0 + DEPTH_TO_COLOUR_SHIFT_PX[1]),
+        ))
+    found.sort(key=lambda item: -item['area_px'])
+    return found
+
+
+def pick_graspable(objects, max_width_mm=60.0, min_width_mm=8.0,
+                   min_top_mm=8.0, centre_px=(640.0, 360.0)):
+    """Choose the object most likely to be the intended target.
+
+    Geometry alone returns every object on the table, including the keyboard.
+    Size filters it down, and nearness to the frame centre breaks the remaining
+    ties, because the operator puts the target in front of the arm.
+    """
+    candidates = [o for o in objects
+                  if min_width_mm <= o['width_mm'] <= max_width_mm
+                  and min_width_mm <= o['depth_mm'] <= max_width_mm
+                  and o['top_mm'] >= min_top_mm]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda o: (
+        (o['colour_px'][0] - centre_px[0]) ** 2 + (o['colour_px'][1] - centre_px[1]) ** 2))
+
+
+def preflight_offset(colour_px, objects):
+    """Offset between a colour detection and the nearest depth object, in px.
+
+    Run whenever both detectors see the same thing; the result is what
+    DEPTH_TO_COLOUR_SHIFT_PX should be set to.
+    """
+    if not objects:
+        return None
+    nearest = min(objects, key=lambda o: (
+        (o['colour_px'][0] - colour_px[0]) ** 2 + (o['colour_px'][1] - colour_px[1]) ** 2))
+    return (colour_px[0] - nearest['colour_px'][0],
+            colour_px[1] - nearest['colour_px'][1]), nearest

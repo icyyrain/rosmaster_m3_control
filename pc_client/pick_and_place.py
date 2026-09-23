@@ -34,8 +34,27 @@ docs/MEASUREMENTS.md.
            stays put is being held. The dark-area grasp signal is not used: it
            does not survive a change of pose.
 
-Dry-run by default: it prints the phases it would run and the first alignment
-step, and touches nothing.
+Before any of that, `preflight` checks what it can check while standing
+still, and refuses to move if something fails. It is cheaper to find out that
+the object is out of range now than with the arm half way down.
+
+Detection is split, and geometry forces the split. `red` thresholds the Lab a*
+channel; it is precise and works right up to contact, but only on red things,
+finding nothing at all on a blue biscuit wrapper. `table` fits the table plane
+and takes whatever stands proud of it, which works on any colour and, unlike
+the colour blob, measures real size: 28 mm for a sweet the colour blob called
+18 mm.
+
+But `table` cannot track. Depth stops being usable below about 120 mm, and the
+gripper sits a fixed 111.9 mm from the camera, so a held object is permanently
+inside the depth dead zone. A run that tried to track with depth lost the
+target at the second creep step and could not verify the grasp at all. So
+`table` acquires and measures, then hands off to colour, and preflight refuses
+the run if colour cannot see the object, because then nothing can track it
+through the grasp.
+
+Dry-run by default: it runs preflight, prints the first alignment step, and
+touches nothing.
 """
 
 import argparse
@@ -55,7 +74,6 @@ import table_plane
 # needs about 8 degrees over the whole path, so it is left to the aligner.
 GOAL_J2, GOAL_J3 = 18, 62
 
-DESCENT_STEPS = 20
 CREEP_STEPS = 5
 HEIGHT_FLOOR_MM = 30.0
 ALIGN_TOLERANCE_PX = 25.0
@@ -67,17 +85,50 @@ LIFT_LADDER = [(33, 53), (54, 40), (90, 20)]
 J1_BAND = (70, 110)
 J4_BAND = (0, 70)
 
+# Range band the FK descent path is valid over. It was solved at 265 mm, and
+# this is not a workspace check: a proper one needs forward kinematics at run
+# time, which this tool does not carry.
+REACH_BAND_MM = (200.0, 340.0)
+
+# What the jaws can actually take, from the aperture calibration.
+GRIPPABLE_MM = (8.0, 60.0)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description='Pick a red object off the table and put it back. Dry-run by default.')
     parser.add_argument('--host', default='192.168.2.4')
     parser.add_argument('--port', type=int, default=9090)
+    parser.add_argument('--detector', choices=('red', 'table'), default='red',
+                        help='red: Lab a* threshold throughout. table: acquire '
+                             'and measure with the depth plane, which works on '
+                             'any colour, then hand off to colour tracking, '
+                             'which is the only thing that still sees the '
+                             'object inside the depth dead zone.')
     parser.add_argument('--a-star', type=int, default=140,
                         help='Lab a* threshold for "red". 128 is neutral.')
     parser.add_argument('--min-area', type=int, default=150)
     parser.add_argument('--width-mm', type=float, default=28.0,
                         help='Object width, which sets the grip aperture.')
+    parser.add_argument('--auto-width', action='store_true',
+                        help='Take the grip width from the depth measurement '
+                             'instead of --width-mm. Only the depth measurement '
+                             'is trustworthy for this; the colour blob is a '
+                             'lower bound and would ask for a crushing grip.')
+    parser.add_argument('--descent-steps', type=int, default=20,
+                        help='Waypoints in the descent. Fewer is quicker but '
+                             'each one moves the image further, so the tracker '
+                             'has more to predict and the plane fit sees more '
+                             'motion blur.')
+    parser.add_argument('--settle', type=float, default=1.0,
+                        help='Multiplier on every settling wait. Below about '
+                             '0.5 the arm is still moving when it is measured.')
+    parser.add_argument('--fast', action='store_true',
+                        help='Shorthand for --descent-steps 10 --settle 0.6. '
+                             'Roughly halves the run at some cost in '
+                             'monitoring quality.')
+    parser.add_argument('--skip-preflight', action='store_true',
+                        help='Run anyway when a preflight check fails.')
     parser.add_argument('--squeeze-mm', type=float, default=5.0,
                         help='How much narrower than the object to close. The '
                              'force knob; 5 mm held a sweet without marking it.')
@@ -86,7 +137,11 @@ def parse_args():
                              'the object back down.')
     parser.add_argument('--execute', action='store_true',
                         help='Actually move. Without this nothing is sent.')
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.fast:
+        args.descent_steps = 10
+        args.settle = 0.6
+    return args
 
 
 class Session(object):
@@ -100,6 +155,8 @@ class Session(object):
         self.rng = numpy.random.default_rng(31)
         self.pose = list(arm_control.HOME_POSE)
         self.last_px = None
+        self.width_mm = args.width_mm
+        self.acquired = False
 
     def close(self):
         self.streams.close()
@@ -109,13 +166,42 @@ class Session(object):
     def send(self, pose, duration, settle):
         self.pose = arm_control.clamp_pose(pose)
         self.link.send(self.pose, duration)
-        time.sleep(settle)
+        time.sleep(max(0.15, settle * self.args.settle))
+
+    def wait_for_depth(self, timeout=8.0):
+        deadline = time.time() + timeout
+        while self.streams.depth() is None and time.time() < deadline:
+            time.sleep(0.1)
+        return self.streams.depth() is not None
 
     def look(self, predicted=None):
         """Detect the target and measure what depth still supports.
 
-        Returns a dict, or None when the target is not where it should be.
+        Returns a dict, or None when the target is not where it should be. Both
+        detectors are gated the same way: a candidate more than GATE_PX from
+        where the Jacobian says the target should have moved is rejected rather
+        than followed, because the alternative is steering from a bad fix.
         """
+        # The table detector acquires and measures; colour tracks. That split
+        # is forced by geometry, not taste. Depth stops being usable below
+        # about 120 mm, and the gripper sits a fixed 111.9 mm from the camera,
+        # so a held object is permanently inside the depth dead zone. A run
+        # that tried to track with depth lost the target at the second creep
+        # step and could not verify the grasp at all.
+        if self.args.detector == 'table' and predicted is None and not self.acquired:
+            found = self._look_table(predicted)
+            if found is not None:
+                self.acquired = True
+        else:
+            found = self._look_red(predicted)
+        if found is None:
+            return None
+        found['height'], found['support'] = table_plane.gripper_height_retry(
+            self.streams, self.rng)
+        self.last_px = (found['cx'], found['cy'])
+        return found
+
+    def _look_red(self, predicted):
         bgr = self.streams.colour()
         if bgr is None:
             return None
@@ -124,11 +210,27 @@ class Session(object):
         if found is None:
             return None
         cx, cy, area, rivals = found
-        self.last_px = (cx, cy)
-        height, support = table_plane.gripper_height_retry(self.streams, self.rng)
-        return dict(cx=cx, cy=cy, area=area, rivals=rivals,
-                    height=height, support=support,
+        return dict(cx=cx, cy=cy, area=area, rivals=rivals, width_mm=None,
                     range_mm=reach_candy.target_range_mm(self.streams.depth(), (cx, cy)))
+
+    def _look_table(self, predicted):
+        depth = self.streams.depth()
+        objects = table_plane.find_objects(depth, self.rng)
+        if not objects:
+            return None
+        if predicted is None:
+            chosen = table_plane.pick_graspable(objects)
+        else:
+            near = [o for o in objects
+                    if ((o['colour_px'][0] - predicted[0]) ** 2
+                        + (o['colour_px'][1] - predicted[1]) ** 2) ** 0.5 <= GATE_PX]
+            chosen = table_plane.pick_graspable(near) if near else None
+        if chosen is None:
+            return None
+        return dict(cx=chosen['colour_px'][0], cy=chosen['colour_px'][1],
+                    area=chosen['area_px'], rivals=len(objects) - 1,
+                    width_mm=max(chosen['width_mm'], chosen['depth_mm']),
+                    range_mm=chosen['dist_mm'])
 
     def error_px(self, state):
         return (state['cx'] - reach_candy.GRIPPER_PX[0],
@@ -164,16 +266,120 @@ def measure_object(session, state):
     """
     height = table_plane.target_height(
         session.streams.depth(), session.rng, (state['cx'], state['cy']))
-    width_mm = None
+    blob_mm = None
     if state['range_mm']:
         diameter_px = math.sqrt(4.0 * state['area'] / math.pi)
-        width_mm = diameter_px * state['range_mm'] / table_plane.FX_COLOUR
-    print('  object: height above table {}, red blob at least {} wide'.format(
-        '{:.1f} mm'.format(height) if height else 'unknown',
-        '{:.1f} mm'.format(width_mm) if width_mm else 'unknown'))
-    print('  gripping as {:.0f} mm wide (from --width-mm). The blob width is a'.format(
-        session.args.width_mm))
-    print('  lower bound only, so do not copy it into --width-mm.')
+        blob_mm = diameter_px * state['range_mm'] / table_plane.FX_COLOUR
+    width_text = ('depth says {:.1f} mm wide'.format(state['width_mm'])
+                  if state.get('width_mm')
+                  else 'depth width is in the preflight report above')
+    print('  object: {} above the table, {}, colour blob {}'.format(
+        '{:.1f} mm'.format(height) if height else 'height unknown',
+        width_text,
+        '{:.1f} mm'.format(blob_mm) if blob_mm else 'unknown'))
+    print('  gripping as {:.0f} mm wide. Trust the depth figure, not the colour'.format(
+        session.width_mm))
+    print('  blob: the a* mask covers only the red enough part and reads low.')
+
+
+def preflight(session):
+    """Check what can be checked standing still. Returns True to proceed.
+
+    Deliberately modest about what it can prove. A real workspace check needs
+    forward kinematics at run time, which this tool does not carry, so
+    reachability is approximated by the range band the descent path was solved
+    for. That is stated rather than dressed up.
+    """
+    args = session.args
+    results = []
+
+    def check(name, ok, detail, fatal=True):
+        results.append((name, ok, detail, fatal))
+
+    check('colour stream', session.streams.colour() is not None, 'frames arriving')
+    check('depth stream', session.wait_for_depth(), 'frames arriving')
+
+    state = session.look()
+    check('target detected', state is not None,
+          'none found with the {} detector'.format(args.detector)
+          if state is None else
+          'at ({:.0f}, {:.0f}), area {}'.format(state['cx'], state['cy'], state['area']))
+
+    if state is not None:
+        check('no rival detections', state['rivals'] == 0,
+              '{} other candidate(s); the largest or nearest wins'.format(state['rivals']),
+              fatal=False)
+
+        check('table plane found', state['height'] is not None,
+              'gripper {:.0f} mm above the table, {} inliers'.format(
+                  state['height'], state['support'])
+              if state['height'] is not None else 'plane fit failed')
+
+        range_mm = state['range_mm']
+        check('target range known', range_mm is not None,
+              '{:.0f} mm'.format(range_mm) if range_mm else 'no depth at the target')
+
+        if range_mm is not None:
+            in_band = REACH_BAND_MM[0] <= range_mm <= REACH_BAND_MM[1]
+            check('range within the solved band', in_band,
+                  '{:.0f} mm against {:.0f}-{:.0f} mm; the FK descent path was '
+                  'solved at 265 mm'.format(range_mm, *REACH_BAND_MM))
+
+        objects = table_plane.find_objects(session.streams.depth(), session.rng)
+        graspable = table_plane.pick_graspable(objects)
+        if graspable is not None:
+            measured = max(graspable['width_mm'], graspable['depth_mm'])
+            check('object fits the jaws',
+                  GRIPPABLE_MM[0] <= measured <= GRIPPABLE_MM[1],
+                  '{:.0f} mm measured from depth, jaws take {:.0f}-{:.0f} mm'.format(
+                      measured, *GRIPPABLE_MM))
+            check('object stands off the table', graspable['top_mm'] >= 8.0,
+                  '{:.1f} mm tall'.format(graspable['top_mm']))
+            if args.auto_width:
+                session.width_mm = measured
+            # Compare an INDEPENDENT colour detection against depth. Comparing
+            # the chosen detector against itself passes by construction and
+            # tells us nothing, which is worse than having no check.
+            bgr = session.streams.colour()
+            independent = (reach_candy.find_target(bgr, args.a_star, args.min_area)
+                           if bgr is not None else None)
+            if independent is None:
+                check('colour can track it', False,
+                      'depth can acquire this object but no colour fix exists, and '
+                      'colour is the only tracker that works inside the depth dead '
+                      'zone below 120 mm. A non-red object needs an appearance '
+                      'tracker, which is not implemented.',
+                      fatal=args.detector == 'table')
+            else:
+                (dx, dy), _ = table_plane.preflight_offset(
+                    (independent[0], independent[1]), objects)
+                check('detectors agree', abs(dx) < 40 and abs(dy) < 40,
+                      'independent colour fix differs from depth by '
+                      '({:+.0f}, {:+.0f}) px'.format(dx, dy), fatal=False)
+        else:
+            check('object fits the jaws', False,
+                  'nothing graspable on the table plane', fatal=args.detector == 'table')
+
+    command = gripper_state.grip_command(session.width_mm, args.squeeze_mm)
+    check('grip aperture sane', gripper_state.OPEN_CMD < command < gripper_state.MAX_GRIP_CMD,
+          'joint6 {} for a {:.0f} mm object, aperture {:.1f} mm'.format(
+              command, session.width_mm, gripper_state.gap_mm(command)))
+
+    print('=== preflight ===')
+    failed = []
+    for name, ok, detail, fatal in results:
+        mark = 'pass' if ok else ('FAIL' if fatal else 'warn')
+        print('  [{}] {:<28} {}'.format(mark, name, detail))
+        if not ok and fatal:
+            failed.append(name)
+    if failed:
+        print('  {} check(s) failed: {}'.format(len(failed), ', '.join(failed)))
+        if args.skip_preflight:
+            print('  --skip-preflight given, going anyway')
+            return True
+        return False
+    print('  all clear')
+    return True
 
 
 def align(session):
@@ -215,9 +421,9 @@ def descend(session, state):
     print('=== descend ===')
     start = list(session.pose)
     lost = 0
-    for step in range(1, DESCENT_STEPS + 1):
+    for step in range(1, session.args.descent_steps + 1):
         j1, j4 = session.aligned_step(state, 0.6, 4.0)
-        fraction = step / float(DESCENT_STEPS)
+        fraction = step / float(session.args.descent_steps)
         j2 = int(round(start[1] + fraction * (GOAL_J2 - start[1])))
         j3 = int(round(start[2] + fraction * (GOAL_J3 - start[2])))
         delta = (j1 - session.pose[0], j2 - session.pose[1],
@@ -267,10 +473,10 @@ def creep(session, state):
 
 
 def grip(session, state):
-    command = gripper_state.grip_command(session.args.width_mm, session.args.squeeze_mm)
+    command = gripper_state.grip_command(session.width_mm, session.args.squeeze_mm)
     print('=== grip ===')
     print('  object {:.0f} mm, squeeze {:.0f} mm -> aperture {:.1f} mm, joint6 {}'.format(
-        session.args.width_mm, session.args.squeeze_mm,
+        session.width_mm, session.args.squeeze_mm,
         gripper_state.gap_mm(command), command))
     print('  (120 would leave {:.0f} mm and hold nothing; 180 crushes)'.format(
         gripper_state.gap_mm(120)))
@@ -356,9 +562,16 @@ def main():
     try:
         if not session.streams.wait():
             raise RuntimeError('No camera frames. Is the camera driver running?')
-        print('mode: {}\n'.format('EXECUTE' if args.execute else 'DRY-RUN'))
+        print('mode: {}   detector: {}   descent steps: {}   settle x{:.2f}\n'.format(
+            'EXECUTE' if args.execute else 'DRY-RUN', args.detector,
+            args.descent_steps, args.settle))
         session.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS,
                      arm_control.HOMING_TIME_MS / 1000.0 + 1.5 if args.execute else 0.1)
+
+        if not preflight(session):
+            print('\nnot moving. Fix the failures, or pass --skip-preflight.')
+            return 1
+        print()
 
         state = align(session)
         if state is None or not args.execute:
