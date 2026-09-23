@@ -87,7 +87,8 @@ ALIGN_RETRIES = 2
 LOW_PROFILE_HEIGHT_MM = 26.0
 ACQUIRE_ATTEMPTS = 10
 MODEL_BIAS_LIMIT_MM = 25.0
-CLIPPED_TARGET_INSET_PX = 100.0
+ELONGATED_ASPECT = 1.8
+CLIPPED_OFFSET_SMOOTHING = 0.5
 
 # Where the gripper origin should end up, relative to the top of the object.
 # The legacy 8 mm offset held a 28 mm sweet. A 16 mm biscuit needed the guarded
@@ -103,9 +104,25 @@ PROVEN_GRASP_HEIGHT_MM = 28.0
 LOW_PROFILE_PROVEN_HEIGHT_MM = 16.0
 ALIGN_TOLERANCE_PX = 25.0
 GATE_PX = 170.0
+CLIPPED_OFFSET_SAFETY_PX = GATE_PX * 0.85
+
+# Joint 5 rolls the jaws in the image without moving the camera or the gripper
+# origin. Existing 0/90 degree snapshots put the fingers' long axis horizontal
+# at 0 and vertical at 90, so image-line degrees and joint degrees share this
+# zero/sign. Keep a bounded range until more oblique grasps are exercised.
+WRIST_AXIS_AT_J5_90_DEG = 90.0
+WRIST_IMAGE_DEG_PER_JOINT_DEG = 1.0
+WRIST_BAND = (20, 160)
+WRIST_TOLERANCE_DEG = 4.0
+WRIST_MAX_MOVE_DEG = 60
 
 # Retracting and lowering both follow this joint 2 / joint 3 ladder.
 LIFT_LADDER = [(33, 53), (54, 40), (90, 20)]
+# The first two rungs held the 16 mm biscuit; the last, much larger shoulder /
+# elbow move shook it loose. A low-profile elongated object only needs enough
+# clearance to verify and replace it, not the full presentation-height lift.
+ELONGATED_LIFT_LADDER = LIFT_LADDER[:2]
+HELD_PIXEL_DRIFT_PX = 60.0
 
 J1_BAND = (70, 110)
 J4_BAND = (0, 70)
@@ -114,6 +131,7 @@ J4_BAND = (0, 70)
 # this is not a workspace check: a proper one needs forward kinematics at run
 # time, which this tool does not carry.
 REACH_BAND_MM = (200.0, 340.0)
+COLOUR_GUIDED_WORKING_AREA = (0.15, 0.85, 0.15, 0.90)
 
 # What the jaws can actually take, from the aperture calibration.
 GRIPPABLE_MM = (8.0, 60.0)
@@ -122,6 +140,7 @@ GRIPPABLE_MM = (8.0, 60.0)
 # monitor, a shadow or a sleeve, and accepting one as the target is how a run
 # ends up reporting a 198017 px "target" at the edge of the image.
 MAX_PLAUSIBLE_AREA_PX = 60000
+MAX_SCALED_TARGET_AREA_PX = 100000
 RECORD_FPS = 10.0
 
 
@@ -260,6 +279,9 @@ def parse_args():
                              'legacy path for tall objects and uses online-calibrated '
                              'forward kinematics below {:.0f} mm.'.format(
                                  LOW_PROFILE_HEIGHT_MM))
+    parser.add_argument('--no-orient-gripper', action='store_true',
+                        help='Do not rotate joint 5 to follow the long axis of '
+                             'an elongated target. Round targets never rotate it.')
     parser.add_argument('--skip-preflight', action='store_true',
                         help='Run anyway when a preflight check fails.')
     parser.add_argument('--grasp-offset-mm', type=float,
@@ -318,6 +340,8 @@ class Session(object):
         self.object_aspect = None
         self.lock_clipped_target = False
         self.clipped_target_edge = None
+        self.target_geometry_initial = None
+        self.target_offset_px = (0.0, 0.0)
         self.acquired_object = None
 
     def set_object_top(self, top_mm):
@@ -387,17 +411,34 @@ class Session(object):
         bgr = self.streams.colour()
         if bgr is None:
             return None
+        # `last_px` is the corrected centre used by the servo. Identity gating
+        # must follow the actually visible component, so remove the previous
+        # correction before asking find_target which blob is nearby.
+        predicted_observed = predicted
+        if predicted is not None:
+            predicted_observed = (
+                predicted[0] - self.target_offset_px[0],
+                predicted[1] - self.target_offset_px[1])
         found = reach_candy.find_target(
-            bgr, self.args.a_star, self.args.min_area, predicted,
+            bgr, self.args.a_star, self.args.min_area, predicted_observed,
             max_jump=GATE_PX, colour=self.colour)
         if found is None:
             return None
         cx, cy, area, rivals = found
-        if area > MAX_PLAUSIBLE_AREA_PX:
-            return None
         observed = (cx, cy)
-        bounds = reach_candy.target_blob_bounds(
+        geometry = reach_candy.target_blob_geometry(
             bgr, self.colour, observed, self.args.a_star - 128)
+        plausible_area = MAX_PLAUSIBLE_AREA_PX
+        if (self.lock_clipped_target and geometry is not None
+                and self.target_geometry_initial is not None
+                and self.target_geometry_initial['short_px'] > 1.0):
+            scale = geometry['short_px'] / self.target_geometry_initial['short_px']
+            expected_area = self.target_geometry_initial['area_px'] * scale * scale
+            plausible_area = min(MAX_SCALED_TARGET_AREA_PX,
+                                 max(plausible_area, expected_area * 1.5))
+        if area > plausible_area:
+            return None
+        bounds = geometry['bounds'] if geometry is not None else None
         clipped = ()
         if bounds is not None:
             x, y, width, height = bounds
@@ -406,6 +447,10 @@ class Session(object):
                 ('left', x <= 1), ('right', x + width >= frame_width - 1),
                 ('top', y <= 1), ('bottom', y + height >= frame_height - 1))
                             if touches)
+        if (self.lock_clipped_target and geometry is not None
+                and self.target_geometry_initial is None and not clipped):
+            self.target_geometry_initial = geometry
+
         centre_locked = False
         if (self.lock_clipped_target and predicted is not None
                 and self.clipped_target_edge is None and clipped):
@@ -413,27 +458,32 @@ class Session(object):
                 if edge in clipped:
                     self.clipped_target_edge = edge
                     break
+        compensation = None
         if (self.lock_clipped_target and predicted is not None
-                and self.clipped_target_edge is not None):
-            # The visible blue centroid becomes the serrated tail once the long
-            # wrapper leaves the bottom of the image.  Aim a little farther into
-            # the hidden body instead; aligning this virtual point with the
-            # gripper pulls the middle back under the jaws.  The offset stays
-            # inside the 170 px identity gate and is used only for the elongated
-            # depth-confirmed target.
-            if self.clipped_target_edge == 'bottom':
-                cy += CLIPPED_TARGET_INSET_PX
-            elif self.clipped_target_edge == 'top':
-                cy -= CLIPPED_TARGET_INSET_PX
-            elif self.clipped_target_edge == 'right':
-                cx += CLIPPED_TARGET_INSET_PX
-            elif self.clipped_target_edge == 'left':
-                cx -= CLIPPED_TARGET_INSET_PX
-            centre_locked = True
+                and self.clipped_target_edge is not None
+                and self.target_geometry_initial is not None
+                and geometry is not None):
+            # Estimate how much of the long side has disappeared. The short
+            # side supplies the current image scale; half of the missing long
+            # side is exactly the shift from the visible centroid to the full
+            # object's centre. This replaces the old fixed 100 px guess.
+            compensation = reach_candy.clipped_centre_offset(
+                self.target_geometry_initial, geometry,
+                self.clipped_target_edge, self.target_offset_px,
+                smoothing=CLIPPED_OFFSET_SMOOTHING,
+                max_offset_px=CLIPPED_OFFSET_SAFETY_PX)
+            if compensation is not None:
+                self.target_offset_px = compensation['offset']
+                cx += self.target_offset_px[0]
+                cy += self.target_offset_px[1]
+                centre_locked = compensation['magnitude_px'] > 0.5
+        else:
+            self.target_offset_px = (0.0, 0.0)
         return dict(cx=cx, cy=cy, area=area, rivals=rivals, width_mm=None,
                     range_mm=reach_candy.target_range_mm(
                         self.streams.depth(), observed),
                     observed_px=observed, bounds=bounds, clipped=clipped,
+                    geometry=geometry, compensation=compensation,
                     centre_locked=centre_locked)
 
     def _look_table(self, predicted):
@@ -472,7 +522,14 @@ class Session(object):
                        if ((o['colour_px'][0] - predicted[0]) ** 2
                            + (o['colour_px'][1] - predicted[1]) ** 2) ** 0.5 <= GATE_PX]
         matching = self._colour_filter(objects)
-        return table_plane.pick_graspable(matching or objects), total
+        if matching:
+            # A strong requested-colour match is a better discriminator than
+            # the conservative central work-area heuristic. This lets a known
+            # target that was set down near the lower edge be reacquired while
+            # leaving geometry-only acquisition on the original central 60%.
+            return table_plane.pick_graspable(
+                matching, working_area=COLOUR_GUIDED_WORKING_AREA), total
+        return table_plane.pick_graspable(objects), total
 
     def _colour_filter(self, objects, window=12):
         """Keep the objects whose pixels lean towards the requested colour."""
@@ -512,6 +569,12 @@ class Session(object):
 
 
 def row(step, pose, state, note=''):
+    compensation = state.get('compensation')
+    if compensation is not None and compensation['magnitude_px'] > 0.5:
+        note = '{}{}centre {:+.0f},{:+.0f}px ({:.0f}/{:.0f}px visible)'.format(
+            note, ', ' if note else '',
+            compensation['offset'][0], compensation['offset'][1],
+            compensation['visible_long_px'], compensation['expected_long_px'])
     return '  {:>2} {:<18} height {:>6} range {:>5} target {:>4.0f},{:<4.0f} {}'.format(
         step, str(pose[:4]),
         '{:.1f}'.format(state['height']) if state['height'] else '--',
@@ -678,6 +741,22 @@ def preflight(session):
                 check('detectors agree', abs(dx) < 40 and abs(dy) < 40,
                       'independent colour fix differs from depth by '
                       '({:+.0f}, {:+.0f}) px'.format(dx, dy), fatal=False)
+                geometry = reach_candy.target_blob_geometry(
+                    bgr, session.colour, independent[:2], args.a_star - 128)
+                if geometry is not None:
+                    colour_aspect = geometry['long_px'] / max(
+                        geometry['short_px'], 1e-6)
+                    if colour_aspect >= 1.5:
+                        # Save the complete, high-altitude view. Waiting until
+                        # align finishes can leave only a square-looking tail
+                        # at the frame edge, which is too late to recover the
+                        # original length or long-axis direction.
+                        session.target_geometry_initial = geometry
+                    if session.object_aspect is not None and session.object_aspect >= ELONGATED_ASPECT:
+                        check('colour long axis', colour_aspect >= 1.5,
+                              '{:.1f}:1 at {:.1f} deg in the complete view'.format(
+                                  colour_aspect, geometry['angle_deg']),
+                              fatal=False)
         else:
             check('object fits the jaws', False,
                   'nothing graspable on the table plane', fatal=args.detector == 'table')
@@ -823,6 +902,69 @@ def _look_adaptive(session, predicted, tries=3):
         if attempt + 1 < tries:
             time.sleep(0.2)
     return None
+
+
+def orient_gripper(session, state):
+    """At safe height, roll the open jaws parallel to an elongated target."""
+    if (session.args.no_orient_gripper or not session.lock_clipped_target
+            or session.object_aspect is None
+            or session.object_aspect < ELONGATED_ASPECT):
+        return state
+    geometry = state.get('geometry')
+    geometry_source = 'current view'
+    if (geometry is None or geometry['short_px'] <= 1.0
+            or geometry['long_px'] / geometry['short_px'] < 1.5):
+        geometry = session.target_geometry_initial
+        geometry_source = 'complete preflight view'
+    if geometry is None or geometry['short_px'] <= 1.0:
+        print('=== orient gripper ===')
+        print('  no reliable colour long axis; leaving joint5 at {}'.format(
+            session.pose[4]))
+        return state
+    colour_aspect = geometry['long_px'] / geometry['short_px']
+    if colour_aspect < 1.5:
+        print('=== orient gripper ===')
+        print('  colour component is only {:.1f}:1; leaving joint5 at {}'.format(
+            colour_aspect, session.pose[4]))
+        return state
+
+    object_angle = geometry['angle_deg']
+    wrist_axis = (WRIST_AXIS_AT_J5_90_DEG
+                  + WRIST_IMAGE_DEG_PER_JOINT_DEG
+                  * (session.pose[4] - 90.0)) % 180.0
+    image_delta = reach_candy.line_angle_delta(object_angle, wrist_axis)
+    joint_delta = image_delta / WRIST_IMAGE_DEG_PER_JOINT_DEG
+    joint_delta = max(-WRIST_MAX_MOVE_DEG,
+                      min(WRIST_MAX_MOVE_DEG, joint_delta))
+    target = int(round(max(WRIST_BAND[0],
+                           min(WRIST_BAND[1], session.pose[4] + joint_delta))))
+    remaining = reach_candy.line_angle_delta(
+        object_angle,
+        (WRIST_AXIS_AT_J5_90_DEG
+         + WRIST_IMAGE_DEG_PER_JOINT_DEG * (target - 90.0)) % 180.0)
+
+    print('=== orient gripper ===')
+    print('  object long axis {:.1f} deg ({}), jaw axis {:.1f} deg at joint5 {}'.format(
+        object_angle, geometry_source, wrist_axis, session.pose[4]))
+    if abs(image_delta) <= WRIST_TOLERANCE_DEG:
+        print('  already parallel (error {:+.1f} deg)'.format(image_delta))
+        return state
+    print('  joint5 {} -> {}; expected residual {:+.1f} deg'.format(
+        session.pose[4], target, remaining))
+    pose = list(session.pose)
+    pose[4] = target
+    session.send(pose, max(700, abs(target - session.pose[4]) * 35), 1.5)
+    fresh = session.look(session.last_px)
+    if fresh is None:
+        print('  target became occluded after wrist rotation; restoring joint5')
+        pose[4] = 90
+        session.send(pose, 1200, 1.8)
+        return None
+    refreshed = fresh.get('geometry')
+    if refreshed is not None:
+        print('  target retained; measured long axis {:.1f} deg'.format(
+            refreshed['angle_deg']))
+    return fresh
 
 
 def _recentre_adaptive(session, state):
@@ -1003,9 +1145,9 @@ def travel(session, state, ladder, label):
     return state, held
 
 
-def place(session, state):
+def place(session, state, ladder=LIFT_LADDER):
     print('=== lower and release ===')
-    state, still_held = travel(session, state, list(reversed(LIFT_LADDER)), 'the descent')
+    state, still_held = travel(session, state, list(reversed(ladder)), 'the descent')
     pose = list(session.pose)
     pose[5] = gripper_state.OPEN_CMD
     session.send(pose, 1200, 2.5)
@@ -1015,7 +1157,7 @@ def place(session, state):
         print('  jaws open: target {:>4.0f},{:<4.0f} area {}'.format(
             state['cx'], state['cy'], state['area']))
     print('  retracting; a released object must now drift as predicted')
-    state, still_attached = travel(session, state, LIFT_LADDER, 'the retraction')
+    state, still_attached = travel(session, state, ladder, 'the retraction')
     print('  -> release {}'.format(
         'confirmed' if not still_attached else 'NOT confirmed: it came back up with us'))
     return state
@@ -1045,17 +1187,24 @@ def main():
         session.lock_clipped_target = (
             args.detector == 'table'
             and session.object_aspect is not None
-            and session.object_aspect >= 1.8)
+            and session.object_aspect >= ELONGATED_ASPECT)
         if session.lock_clipped_target:
-            print('tracking {:.0f} px in from the visible end of the elongated '
-                  'target (aspect {:.1f}:1)'.format(
-                      CLIPPED_TARGET_INSET_PX,
+            print('tracking the full centre of the elongated target from its '
+                  'measured visible length (aspect {:.1f}:1)'.format(
                       session.object_aspect))
         print()
 
         state = align(session)
         if state is None or not args.execute:
             return 0
+
+        state = orient_gripper(session, state)
+        if state is None:
+            print('\nwrist orientation lost the target; returning home')
+            session.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS,
+                         arm_control.HOMING_TIME_MS / 1000.0 + 1.0)
+            print('home. final pose {}'.format(session.pose))
+            return 1
 
         state = descend(session, state)
         if state is None:
@@ -1068,22 +1217,41 @@ def main():
             print('home. final pose {}'.format(session.pose))
             return 1
         state = grip(session, state)
+        grasp_px = ((state['cx'], state['cy']) if state is not None else None)
+        elongated = (session.object_aspect is not None
+                     and session.object_aspect >= ELONGATED_ASPECT)
+        lift_ladder = ELONGATED_LIFT_LADDER if elongated else LIFT_LADDER
 
         print('=== lift and verify ===')
-        state, held = travel(session, state, LIFT_LADDER, 'the lift')
+        if elongated:
+            print('  elongated low-profile object: using the two-rung gentle lift')
+        state, held = travel(session, state, lift_ladder, 'the lift')
         # Gate this one too. Ungated, it once returned a 198017 px region at
         # (189, 233) after the object had left the frame, which is the dark
         # monitor rather than a 34 mm biscuit, and reported it as the target.
         final = session.look(session.last_px)
         offset = None
+        drift = None
         if final:
             offset = ((final['cx'] - reach_candy.GRIPPER_PX[0]) ** 2
                       + (final['cy'] - reach_candy.GRIPPER_PX[1]) ** 2) ** 0.5
+            if grasp_px is not None:
+                drift = ((final['cx'] - grasp_px[0]) ** 2
+                         + (final['cy'] - grasp_px[1]) ** 2) ** 0.5
             print('  fresh look: target {:.0f},{:.0f}, {:.0f} px from the gripper '
-                  'pixel, area {}'.format(final['cx'], final['cy'], offset, final['area']))
+                  'pixel, {:.0f} px from its closed-jaw position, area {}'.format(
+                      final['cx'], final['cy'], offset,
+                      drift if drift is not None else float('nan'), final['area']))
         else:
             print('  fresh look: target not visible')
-        verdict = held and offset is not None and offset < 150
+        # A clipped long package has a visible centroid far from its physical
+        # centre even while correctly held. For it, invariance relative to the
+        # closed-jaw frame is the meaningful test. Round/full-view objects keep
+        # the old absolute gripper-pixel gate.
+        if elongated:
+            verdict = held and drift is not None and drift < HELD_PIXEL_DRIFT_PX
+        else:
+            verdict = held and offset is not None and offset < 150
         print('  VERDICT: {}'.format('HELD' if verdict else 'not held'))
 
         if not verdict:
@@ -1092,7 +1260,7 @@ def main():
             print('\n--keep-holding given; leaving the object in the jaws')
             print('The servo holds with stall torque, so do not leave it long.')
         else:
-            place(session, state or final)
+            place(session, state or final, lift_ladder)
 
         session.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS,
                      arm_control.HOMING_TIME_MS / 1000.0 + 1.0)

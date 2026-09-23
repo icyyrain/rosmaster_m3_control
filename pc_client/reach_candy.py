@@ -29,6 +29,7 @@ touches nothing.
 
 import argparse
 import base64
+import math
 import sys
 import time
 
@@ -344,17 +345,20 @@ def find_target(bgr, a_star, min_area, previous=None, max_jump=120.0,
     return cx, cy, area, rivals
 
 
-def target_blob_bounds(bgr, colour, target_px, threshold=DEFAULT_CHROMA):
-    """Bounding box of the colour component nearest ``target_px``.
+def target_blob_geometry(bgr, colour, target_px, threshold=DEFAULT_CHROMA):
+    """Shape of the colour component nearest ``target_px``.
 
-    The box lets a caller notice that a long object has run out of the image.
-    Its visible-pixel centroid is no longer the physical object centre once
-    that happens, even though it remains a perfectly good identity check.
+    In addition to the axis-aligned bounds, return the component's principal
+    axis and robust lengths along/across it.  Those quantities stay meaningful
+    when a diagonal package touches the image edge, unlike the width and height
+    of an axis-aligned box.  The principal axis is a line, so its sign is
+    deliberately arbitrary; callers choose the sign that points towards the
+    clipped edge.
     """
     mask, _ = chroma_mask(bgr, colour, threshold)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, numpy.ones((5, 5), numpy.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, numpy.ones((9, 9), numpy.uint8))
-    count, _, stats, centroids = cv2.connectedComponentsWithStats(
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(
         mask, connectivity=8)
     if count < 2:
         return None
@@ -362,7 +366,96 @@ def target_blob_bounds(bgr, colour, target_px, threshold=DEFAULT_CHROMA):
     label = min(candidates, key=lambda item: (
         (centroids[item][0] - target_px[0]) ** 2
         + (centroids[item][1] - target_px[1]) ** 2))
-    return tuple(int(value) for value in stats[label, :4])
+    rows, columns = numpy.nonzero(labels == label)
+    if len(columns) < 5:
+        return None
+    points = numpy.column_stack((columns, rows)).astype(numpy.float64)
+    centre = numpy.asarray(centroids[label], dtype=numpy.float64)
+    covariance = numpy.cov(points - centre, rowvar=False)
+    values, vectors = numpy.linalg.eigh(covariance)
+    axis = vectors[:, int(numpy.argmax(values))]
+    # Give repeated measurements a stable representation.  The line itself is
+    # still unsigned: (-u) and (+u) describe the same object orientation.
+    if axis[0] < 0.0 or (abs(axis[0]) < 1e-9 and axis[1] < 0.0):
+        axis = -axis
+    normal = numpy.array((-axis[1], axis[0]))
+    along = points @ axis
+    across = points @ normal
+    long_px = float(numpy.percentile(along, 99) - numpy.percentile(along, 1))
+    short_px = float(numpy.percentile(across, 99) - numpy.percentile(across, 1))
+    angle_deg = math.degrees(math.atan2(axis[1], axis[0])) % 180.0
+    return dict(
+        bounds=tuple(int(value) for value in stats[label, :4]),
+        centre=(float(centre[0]), float(centre[1])),
+        axis=(float(axis[0]), float(axis[1])),
+        angle_deg=angle_deg,
+        long_px=long_px,
+        short_px=short_px,
+        area_px=int(stats[label, cv2.CC_STAT_AREA]))
+
+
+def target_blob_bounds(bgr, colour, target_px, threshold=DEFAULT_CHROMA):
+    """Compatibility wrapper returning only the nearest component's bounds."""
+    geometry = target_blob_geometry(bgr, colour, target_px, threshold)
+    return geometry['bounds'] if geometry is not None else None
+
+
+def clipped_centre_offset(initial, current, edge, previous=(0.0, 0.0),
+                          smoothing=0.5, max_offset_px=None):
+    """Estimate the hidden-half correction for a clipped elongated blob.
+
+    ``initial`` is a complete view and ``current`` is the visible component.
+    The short side, which remains visible when a bar leaves through one end,
+    estimates image scale.  The missing part of the long side then moves the
+    visible centroid by half that missing length towards the clipped edge.
+
+    The edge chooses the sign of the otherwise unsigned PCA axis.  A low-pass
+    filter avoids commanding a discontinuity from one noisy segmentation.
+    ``max_offset_px`` is only a safety envelope; the commanded magnitude comes
+    from the measured missing length rather than that limit.
+    """
+    if initial is None or current is None or edge is None:
+        return None
+    initial_short = float(initial.get('short_px') or 0.0)
+    current_short = float(current.get('short_px') or 0.0)
+    if initial_short <= 1.0 or current_short <= 1.0:
+        return None
+    scale = max(0.5, min(4.0, current_short / initial_short))
+    expected = float(initial['long_px']) * scale
+    visible = float(current['long_px'])
+    missing = max(0.0, expected - visible)
+    magnitude = 0.5 * missing
+    if max_offset_px is not None:
+        magnitude = min(float(max_offset_px), magnitude)
+
+    outward = {
+        'left': numpy.array((-1.0, 0.0)),
+        'right': numpy.array((1.0, 0.0)),
+        'top': numpy.array((0.0, -1.0)),
+        'bottom': numpy.array((0.0, 1.0)),
+    }.get(edge)
+    if outward is None:
+        return None
+    axis = numpy.asarray(current['axis'], dtype=numpy.float64)
+    if float(axis @ outward) < 0.0:
+        axis = -axis
+    raw = axis * magnitude
+    old = numpy.asarray(previous, dtype=numpy.float64)
+    alpha = max(0.0, min(1.0, float(smoothing)))
+    filtered = (1.0 - alpha) * old + alpha * raw
+    return dict(
+        offset=(float(filtered[0]), float(filtered[1])),
+        raw_offset=(float(raw[0]), float(raw[1])),
+        scale=scale,
+        expected_long_px=expected,
+        visible_long_px=visible,
+        missing_long_px=missing,
+        magnitude_px=float(numpy.linalg.norm(filtered)))
+
+
+def line_angle_delta(target_deg, current_deg):
+    """Shortest signed rotation between two unoriented image lines."""
+    return (float(target_deg) - float(current_deg) + 90.0) % 180.0 - 90.0
 
 
 def target_range_mm(depth, colour_px, search=30):
