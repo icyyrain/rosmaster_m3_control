@@ -493,6 +493,58 @@ its area falling from 7135 to 2535, and on retraction it finally drifted as
 predicted, 58 px from the prediction at the first step and out of frame after
 that. Exactly what a sweet sitting on the desk should do.
 
+## Grip force, and what the readout can really see
+
+There is no force or current feedback on this arm. `ArmJoints` carries angles
+only, so a servo told to reach 180 on an object that stops it at 120 keeps
+pushing with its stall torque. That is what flattened the chocolate on the
+first successful grasp, where the clamp was commanded straight to 180.
+
+Grip force is therefore set by how far past contact the command goes, which
+means contact has to be found. `gripper_state.py --mode grip` closes in
+increments and watches the dark-area readout: free jaws move it at a measurable
+rate, blocked jaws stop moving while the command keeps rising.
+
+### Every constant describing the readout is pose dependent
+
+This was the surprise. The earlier characterisation was taken at pose
+`[90, 120, 0, 23]` and gave a usable band of 30-120 at about 97 px per degree.
+Measured again at the home pose:
+
+| joint6 | 30-50 | 55 | 65 | 90 | 105 | 110 | 115 | 120 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| area px | **0** | 122 | 996 | 5803 | 7714 | 7938 | 7956 | 7934 |
+
+The jaws do not register at all below 55, the rate is about 161-197 px per
+degree rather than 97, and the reading saturates at 110 rather than 120. So the
+band, the slope and the saturation angle are all pose and lighting dependent,
+which is broader than the earlier note that only the absolute reference fails
+to transfer.
+
+`--mode calibrate` now measures all three on empty jaws at the working pose and
+prints the flags to hand to `--mode grip`. At the home pose it reported:
+visible from 60 degrees, free rate 197 px per degree, saturation at 110.
+
+### The false grip on empty jaws
+
+A first version of the contact test used the single global 97 px per degree and
+started judging from 30 degrees. At the home pose the reading there is flat
+zero, so the increments were zero, which the test read as a collapse: it
+reported contact at 35 degrees and a firm grip on empty jaws.
+
+Two fixes. Nothing is judged until the area clears a visibility floor, because
+an increment of zero means "cannot see", not "blocked". And saturation is
+distinguished from contact using the calibrated ceiling, since the two look
+identical in this signal; a collapse at or above the ceiling is reported as
+closed on nothing.
+
+The negative control now passes. On empty jaws at the home pose the sweep
+labels 35-55 as not visible, 60-105 as free at 40-109% of the free rate, sees
+the first weak increment at 110, which is the ceiling, and concludes that the
+jaws closed on nothing, leaving them open.
+
+Still to test: the positive case, which needs an object between the jaws.
+
 ## What this means for reinforcement learning
 
 Usable today, without touching the firmware, for **visual servoing**: the
