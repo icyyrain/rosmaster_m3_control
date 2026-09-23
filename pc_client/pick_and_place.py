@@ -66,6 +66,7 @@ import numpy
 
 import arm_control
 import gripper_state
+import kinematics
 import reach_candy
 import table_plane
 
@@ -74,7 +75,7 @@ import table_plane
 # needs about 8 degrees over the whole path, so it is left to the aligner.
 GOAL_J2, GOAL_J3 = 18, 62
 
-CREEP_STEPS = 5
+CREEP_STEPS = 12   # was 5, which was the only thing stopping a flat object
 
 # Where the gripper origin should end up, relative to the top of the object.
 # Anchored on the one grasp that worked: a 28 mm sweet was held when the creep
@@ -105,7 +106,11 @@ HEIGHT_FLOOR_MM = 18.0          # absolute floor, whatever the object
 # which means carrying forward kinematics at run time.
 PROVEN_GRASP_HEIGHT_MM = 28.0
 FAILED_GRASP_HEIGHT_MM = 15.9
+# Those two numbers predate the creep being closed-loop and step-limited to 12.
+# The 15.9 mm failure was a step budget, not a reach limit, so the warning is
+# kept only as a note that short objects are less proven.
 ALIGN_TOLERANCE_PX = 25.0
+ALIGN_RETRIES = 3
 GATE_PX = 170.0
 
 # Retracting and lowering both follow this joint 2 / joint 3 ladder.
@@ -460,8 +465,8 @@ def preflight(session):
             session.set_object_top(graspable['top_mm'])
             top = graspable['top_mm']
             check('tall enough to grasp', top >= PROVEN_GRASP_HEIGHT_MM - 2.0,
-                  '{:.1f} mm; {:.0f} mm has been picked up, {:.1f} mm failed twice '
-                  'with the jaws closing above it'.format(
+                  '{:.1f} mm; {:.0f} mm is proven, {:.1f} mm failed when the creep '
+                  'was limited to five steps and is now retried'.format(
                       top, PROVEN_GRASP_HEIGHT_MM, FAILED_GRASP_HEIGHT_MM),
                   fatal=False)
 
@@ -589,19 +594,37 @@ def descend(session, state):
 
 
 def creep(session, state):
+    """Descend the last few millimetres, steered by forward kinematics.
+
+    Two earlier versions failed here and both failures came from not knowing
+    where the gripper was. A fixed five-rung ladder ran out of steps rather
+    than travel and stopped 38.4 mm up while a 15.9 mm object needed 24 mm.
+    Closing the loop on the measured height instead did not help, because the
+    depth stream dies below about 120 mm of range: on the retry the reading
+    vanished at the fourth step, and the ladder carried on raising joint 3,
+    which once joint 2 hits 0 lifts the gripper rather than lowering it.
+
+    So the step now comes from the model, which does not need depth and knows
+    the sign of joint 3 reverses. The measured height, while it lasts, is kept
+    as a cross-check rather than as the controller.
+    """
     print('=== creep ===')
+    target = session.stop_height_mm
+    print('  aiming for {:.1f} mm, modelled at {:.1f} mm now'.format(
+        target, kinematics.gripper_height_mm(session.pose)))
     for step in range(1, CREEP_STEPS + 1):
         j1, j4 = session.aligned_step(state, 0.5, 2.0)
-        if session.pose[1] <= 0:
-            print('  joint 2 is out of travel at {:.1f} mm; the path cannot go '
-                  'lower'.format(state['height'] if state['height'] else float('nan')))
+        proposal = list(session.pose)
+        proposal[0], proposal[3] = j1, j4
+        moved, modelled = kinematics.approach_height(proposal, target)
+        if moved is None:
+            print('  model says {:.1f} mm is as close as it gets to {:.1f} mm'.format
+                  (modelled, target))
             break
-        j2 = max(0, session.pose[1] - 3)
-        j3 = min(180, session.pose[2] + 2)
-        delta = (j1 - session.pose[0], j2 - session.pose[1],
-                 j3 - session.pose[2], j4 - session.pose[3])
+
+        delta = tuple(moved[i] - session.pose[i] for i in range(4))
         predicted = reach_candy.predict_target(session.last_px, delta)
-        session.send([j1, j2, j3, j4, session.pose[4], session.pose[5]], 800, 1.6)
+        session.send(moved, 800, 1.6)
 
         fresh = session.look(predicted)
         if fresh is None:
@@ -609,13 +632,41 @@ def creep(session, state):
                 step, str(session.pose[:4])))
             return state
         state = fresh
-        print(row(step, session.pose, state))
-        if state['height'] is not None and state['height'] <= session.stop_height_mm:
-            print('  reached {:.1f} mm, the height this object needs'.format(
-                session.stop_height_mm))
-            break
-        if state['range_mm'] and state['range_mm'] <= table_plane.CAM_TO_GRIPPER_MM:
-            print('  target reached the gripper distance')
+        note = 'model {:.1f} mm'.format(modelled)
+        if state['height'] is not None:
+            note += ', measured {:.1f}'.format(state['height'])
+        print(row(step, session.pose, state, note))
+
+        # Re-centre before descending again. A descent step moves joints 2 and
+        # 3 by a few degrees, which by the Jacobian shifts the image 70 px or
+        # so, while one alignment correction on joint 4 is worth under 30 px.
+        # Without this the target drifted 117 px above the gripper pixel by the
+        # time the jaws closed, and the grasp missed even though the height was
+        # right.
+        for _ in range(ALIGN_RETRIES):
+            error = session.error_px(state)
+            if (error[0] ** 2 + error[1] ** 2) ** 0.5 <= ALIGN_TOLERANCE_PX:
+                break
+            j1, j4 = session.aligned_step(state, 0.6, 4.0)
+            if (j1, j4) == (session.pose[0], session.pose[3]):
+                break
+            pose = list(session.pose)
+            pose[0], pose[3] = j1, j4
+            predicted = reach_candy.predict_target(
+                session.last_px, (j1 - session.pose[0], 0, 0, j4 - session.pose[3]))
+            session.send(pose, 500, 1.0)
+            fresh = session.look(predicted)
+            if fresh is None:
+                print('     re-centre lost the target')
+                return state
+            state = fresh
+            print('     re-centre {:<14} target {:>4.0f},{:<4.0f} |e| {:.0f}'.format(
+                str(session.pose[:4]), state['cx'], state['cy'],
+                (session.error_px(state)[0] ** 2
+                 + session.error_px(state)[1] ** 2) ** 0.5))
+
+        if modelled <= target + 1.0:
+            print('  arrived at the height this object needs')
             break
     return state
 
