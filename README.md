@@ -16,6 +16,9 @@ ROS 2/rosbridge 与 ROSMASTER M3 Pro 交互，最终用于“读取真实机械�
 - 控制板串口：`/dev/myserial -> /dev/ttyUSB0`
 - USB 串口芯片：Silicon Labs CP2104，序列号 `02C4DDB5`
 - 深度相机：Orbbec DaBai DCW2，话题命名空间 `/high_camera`，驱动需手动启动
+- 相机**装在机械臂 `arm4` 连杆上**（eye-in-hand），画面是关节 1–4 的函数；
+  关节 5 和夹爪在 `arm4` 下游，不影响画面
+- 实测的机械臂特性（回差、延迟、死区等）见 `docs/MEASUREMENTS.md`
 - Windows 有线网卡：`Realtek Gaming 2.5GbE Family Controller`
 - Windows 直连小车时的地址：`192.168.2.10/24`
 
@@ -210,7 +213,53 @@ python .\pc_client\teleop_view.py --home --execute
 之：仲裁器要求真实反馈，当前条件下必然拒绝转发。等固件刷入且 `/joint_states` 有
 真实数据后，应改为经 `/arm/command/test` 走仲裁。
 
-### 5. 机械臂命令
+### 5. 视觉状态与机械臂特性测量
+
+固件没有关节反馈，但相机装在 `arm4` 上，所以**画面本身就是关节 1–4 的观测量**。
+这条通道不需要刷固件，也不需要标定。
+
+`pc_client/visual_state.py` 用固定的 AprilTag 解算相机 6 自由度绝对位姿。先生成
+并打印标记：
+
+```powershell
+python .\pc_client\make_apriltag.py --id 0 --size-mm 150
+```
+
+按 100% 打印（不要"适应页面"），用尺子核对页面上的 100 mm 参考线 —— 标记尺寸误差
+会 1:1 传递到距离。贴在固定位置后：
+
+```powershell
+python .\pc_client\visual_state.py --tag-mm 150 --seconds 30
+```
+
+`pc_client/vision_metrology.py` 提供另一条精度更高的通道：用场景自身做参考，估计
+全局图像变换。它是差分测量，静态噪声 0.03–0.05 px，对应千分之几度，但不给绝对角度。
+
+`pc_client/arm_diagnostics.py` 基于它测量机械臂特性。**这些测试会让机械臂运动：**
+
+```powershell
+python .\pc_client\arm_diagnostics.py --test coupling   # 哪些关节驱动相机
+python .\pc_client\arm_diagnostics.py --test sweep      # 死区、线性度、回差
+python .\pc_client\arm_diagnostics.py --test step       # 阶跃响应与延迟
+python .\pc_client\arm_diagnostics.py --test hold       # 到位后是否抖动
+```
+
+2026-09-23 的实测结果全部记录在 `docs/MEASUREMENTS.md`，摘要：
+
+| 项目 | 实测 |
+| --- | --- |
+| 1° 指令死区 | 无，40/40 步均产生运动 |
+| 回差 | **0.996°**，反向后首步只走 14–30% |
+| 幅度精度 | 6° 指令 → 6.01–6.29° |
+| `ArmJoints.time` | 确实控制轨迹时长 |
+| 视觉闭环起动延迟 | 240–330 ms |
+| 到位后保持稳定性 | ≤0.124 px（约 0.007°），不抖动 |
+
+结论：**视觉伺服类任务今天就可做**，不必刷固件。真正的短板是夹爪不可观测（无法
+确认抓取成功）和 2–3 Hz 的控制上限，两者都有不拆机的解法。详见
+`docs/MEASUREMENTS.md` 末节。
+
+### 6. 机械臂命令
 
 原厂命令格式如下，执行后机械臂会真实运动：
 
@@ -235,9 +284,19 @@ python .\pc_client\safe_command.py --joints 90 90 90 90 90 90 --time-ms 200
 ## 当前机械臂反馈结论
 
 目前无法从正在运行的原厂 ROS 2 节点读到真实关节角：`/arm6_joints` 是命令话题，
-原厂节点内部保存的目标值也不能证明舵机已经到达。现已从 Yahboom 官方附件确认，
-总线舵机支持读取当前位置寄存器；官方 STM32 示例也包含位置查询代码，但未发布为
-ROS 2 反馈，并且示例接收路径有缺失。
+原厂节点内部保存的目标值也不能证明舵机已经到达。已逐一排除其它可能：`/YB_Node`
+的机械臂话题全是 Subscriber 且没有任何 service；`arm_interface/msg/CurJoints`
+（"当前关节"）的所有发布者都只是 demo 节点回显自己刚算出的目标值；MoveIt 配置
+`M3Pro_config` 的 18 个 `state_interface` 用的是 `mock_components/GenericSystem`，
+配置文件自己的注释写着不适用于真实硬件 —— 它会把命令原样回显，很容易被误当成反馈。
+
+现已从 Yahboom 官方附件确认，总线舵机支持读取当前位置寄存器；官方 STM32 示例也
+包含位置查询代码，但未发布为 ROS 2 反馈，并且示例接收路径有缺失。
+
+**但关节角已不再是唯一的状态来源。** 相机装在 `arm4` 上，因此画面可以观测关节
+1–4，无需刷固件；这条通道和实测精度见上文第 5 节与 `docs/MEASUREMENTS.md`。
+仍然缺失的是夹爪与关节 5 的状态，以及堵转/碰撞检测 —— 后者只能靠舵机反馈，
+所以 `m3pro_arm_safety` 的 `require_feedback: true` 应当保持。
 
 计划中的数据链路是：
 
@@ -321,6 +380,11 @@ ROS 2 反馈，并且示例接收路径有缺失。
   - `camera_view.py`：实时查看相机彩色、深度或红外流。
   - `teleop_view.py`：画面与机械臂点动合并到一个窗口，默认 dry-run。
   - `safe_command.py`：经安全仲裁器下发单条指令，默认 dry-run。
+  - `make_apriltag.py`：生成可打印的 AprilTag（SVG，物理尺寸精确）。
+  - `visual_state.py`：从固定 AprilTag 解算相机绝对位姿，含噪声统计。
+  - `vision_metrology.py`：以场景为参考的差分图像位移测量，精度高一个量级。
+  - `arm_diagnostics.py`：机械臂特性测量（会让机械臂运动）。
+- `docs/MEASUREMENTS.md`：相机与机械臂的实测数据、方法学陷阱和对强化学习的结论。
 - `docs/IMPLEMENTATION_PLAN.md`：架构、构建步骤和安全约束。
 - `firmware/m3pro_arm_feedback`：官方 STM32 示例的反馈补丁、校验值和实验 HEX。
 - `backups/2026-09-21-source-backup.md`：已拉回本机的 Jetson 源码备份清单。

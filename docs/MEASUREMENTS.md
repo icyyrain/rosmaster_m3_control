@@ -1,0 +1,199 @@
+# M3 Pro arm and camera measurements
+
+Measured 2026-09-23 with `pc_client/arm_diagnostics.py` and
+`pc_client/visual_state.py` against the real robot at `192.168.2.4`.
+
+None of these numbers can be read from ROS. The control board publishes no
+joint feedback, so they were measured optically, using the camera as the
+sensor. Everything below is a differential measurement against the scene, so
+it needs no AprilTag and no calibration.
+
+## Why the camera can measure the arm
+
+`yahboom_M3Pro_description/urdf/M3Pro.urdf` attaches the Orbbec DaBai DCW2
+through a **fixed** joint `DCW2_Joint` whose parent is **`arm4`**:
+
+```text
+base_link -> arm1 -> arm2 -> arm3 -> arm4 -> DCW2
+```
+
+So the camera is eye-in-hand. Its view is a function of joints 1-4. Joint 5
+(`arm5_Joint`, wrist roll) and the gripper (`rlink1_Joint`) are downstream of
+arm4 and do not move it.
+
+The URDF also carries a `Camera` link on `base_link` with zero limits. No
+matching USB device was present, so treat it as an unused mount.
+
+URDF joint limits for arm1..arm5 are -1.571..1.571 rad, that is +-90 degrees,
+matching the 0..180 servo command range with 90 as centre. The gripper
+`rlink1_Joint` is -0.95..0 rad.
+
+## Kinematic coupling, measured
+
+Joints predicted invisible were given six times the command of the others, so
+the experiment was biased against its own hypothesis.
+
+| joint | command | image motion | verdict |
+| --- | --- | --- | --- |
+| 1 base yaw | +10 deg | 118.15 px | moves camera |
+| 2 shoulder | +10 deg | 110.50 px | moves camera |
+| 3 elbow | +10 deg | 127.35 px | moves camera |
+| 4 wrist pitch | +10 deg | 138.56 px | moves camera |
+| 5 wrist roll | **+60 deg** | **0.00 px** | invisible |
+| 5 wrist roll | **-60 deg** | 0.85 px | invisible |
+| 6 gripper | **+60 deg** | 1.43 px | invisible |
+
+Static noise floor over the same window was 0.03-0.05 px. The URDF is
+confirmed, including the blind spot.
+
+## Joint 1 sweep: deadband, linearity, backlash
+
+One degree is the finest `ArmJoints` command, so whether a one-degree command
+does anything decides whether a one-degree action space is meaningful.
+
+- **No deadband.** All 40 one-degree steps produced motion. Median step
+  17.84 px, minimum 2.56 px, maximum 26.01 px.
+- **Sensitivity 18.81 px per degree** near home, worst linearity residual
+  4.61 px, that is 0.245 degrees.
+- **Backlash 0.996 degrees.** The same commanded angle lands 17.77 px apart on
+  average depending on whether it was approached rising or falling.
+- The **first step after a direction reversal delivers only 14-30%** of normal
+  travel: 2.56 px and 5.34 px against a 17.84 px median. This is the clearest
+  signature of the backlash.
+
+Same-direction repeatability is excellent. A direction reversal costs about a
+full degree.
+
+## Step response
+
+Six-degree steps on joint 1, several `ArmJoints.time` values.
+
+| commanded time | travel | onset | 95% complete |
+| --- | --- | --- | --- |
+| 200 ms | 6.26 deg | 241 ms | 416 ms |
+| 500 ms | 6.29 deg | 264 ms | 704 ms |
+| 1000 ms | 6.01 deg | 329 ms | 1143 ms |
+| 1500 ms | 6.15 deg | 285 ms | 1538 ms |
+
+- **Amplitude is accurate**: 6 degrees commanded gives 6.01-6.29 measured.
+- **`ArmJoints.time` really sets trajectory duration.** 95% completion tracks
+  the commanded value.
+- **Onset latency 240-330 ms**, end to end: Windows, rosbridge, DDS,
+  micro-ROS, servo, then back through JPEG encode, the WebSocket and decode.
+  This is the dead time of any vision-in-the-loop controller built this way.
+
+## Holding position
+
+| condition | std dev | range | inliers |
+| --- | --- | --- | --- |
+| idle, long after last command | 0.046 px | 0.215 px | 942 |
+| 1.5-4.5 s after a 6 deg step | 0.124 px | 0.618 px | 828 |
+| 10-13 s after the same step | 0.031 px | 0.125 px | 924 |
+| while re-sent every 300 ms | 0.032 px | 0.154 px | 929 |
+
+**The arm does not hunt.** Residual motion after a move is at most 0.124 px,
+roughly 0.007 degrees, and continuously re-sending the target does not excite
+it. Static poses are reliable; all the uncertainty is in getting there.
+
+## Two measurement artifacts that produced wrong numbers
+
+Both came from putting the reference frame too far from what was being
+measured. They are recorded because both looked like real hardware findings.
+
+1. **Accumulated return error read as joint coupling.** Comparing every trial
+   against one reference captured at the start made joints 5 and 6 report 9.67
+   and 9.44 px, enough to look like real motion. The values were suspiciously
+   equal to each other despite very different commands, and the inlier count
+   had risen from ~230 to ~840, meaning the view was nearly identical. The
+   cause was that the arm does not return exactly to a commanded pose, so late
+   trials inherited the accumulated error. Taking a fresh reference immediately
+   before each trial gave 0.00 and 0.85 px.
+
+2. **Reduced view overlap read as servo hunting.** Measuring the post-move tail
+   against a pre-move reference gave a 2.04 px standard deviation, about
+   twentyfold the idle figure, which looked like the arm oscillating. But the
+   inlier count had collapsed from ~940 to ~400. Taking the reference at the
+   new pose gave 0.124 px.
+
+**Rule:** take the reference close to the measurement, and read the inlier
+count. If it falls by half, the numbers are not comparable.
+
+## AprilTag pose pipeline
+
+`visual_state.py` was validated offline against the robot's real intrinsics
+(`fx=720.501, fy=720.4833, cx=649.1655, cy=359.6946`, 8-coefficient rational
+polynomial). Seven poses from 350 mm to 1200 mm, face-on to steeply tilted, all
+recovered to 0.000000 mm and 0.000000 deg with zero reprojection error.
+
+**`SOLVEPNP_IPPE_SQUARE` fails on an exactly face-on square.** At 0.0 degrees
+of tilt *both* of its solutions come back about 93 degrees from the truth with
+68 px of reprojection error. Three degrees of tilt is enough to fix it, and
+`SOLVEPNP_SQPNP` is exact throughout. `visual_state.py` therefore enumerates
+candidates from both solvers, rejects any with the tag behind the camera, picks
+the lowest reprojection error, and reports how far ahead the winner was so that
+the classic AprilTag pose flip is visible rather than silent.
+
+Predicted noise floor against subpixel corner noise, from the same validation:
+
+| corner noise | distance | lateral | along normal | rotation |
+| --- | --- | --- | --- | --- |
+| 0.05 px | 400 mm | 0.88 mm | 0.08 mm | 0.12 deg |
+| 0.10 px | 400 mm | 1.79 mm | 0.15 mm | 0.26 deg |
+| 0.10 px | 800 mm | 15.0 mm | 0.71 mm | 1.08 deg |
+| 0.30 px | 800 mm | 43.6 mm | 3.12 mm | 3.15 deg |
+
+Lateral noise exceeds noise along the normal because it is dominated by
+rotation error: 400 mm times 0.26 degrees is 0.87 mm, matching the table.
+Distance along the tag normal is fixed by apparent tag size and is the
+best-determined axis.
+
+Tag scale error passes straight through to distance: a tag printed 1% small
+puts every distance 1% off, while angles stay correct. Hence the 100 mm
+reference line on the generated sheet. Absolute tag-based pose is roughly an
+order of magnitude less precise than the differential scene measurement, so
+prefer differential measurement wherever the task allows it.
+
+The camera itself: colour 1280x720 at 29.5 fps over rosbridge, 3.1 MB/s; depth
+640x360 at 9.7 fps; IR 640x400 at 10 fps.
+
+## What this means for reinforcement learning
+
+Usable today, without touching the firmware, for **visual servoing**: the
+camera sees the target, the policy commands joints, the arm executes
+accurately, the camera sees the result. The loop closes without joint angles.
+
+Not usable for:
+
+- **Grasp confirmation.** The gripper is downstream of arm4 and invisible.
+  Workarounds that need no firmware: close, lift, and check optically whether
+  the object moved with the arm; or add a fixed second camera with a marker on
+  the gripper, which also recovers joint 5.
+- **Stall and collision detection**, which needs servo feedback. Safety stays
+  a human-in-the-loop matter, and `m3pro_arm_safety` should keep
+  `require_feedback: true`.
+- **Control above about 3 Hz** over rosbridge, given 416 ms to 95% at
+  `time=200`. Run the policy on the Jetson to beat that.
+
+Backlash is the same size as the action resolution, so a naive one-degree
+action space carries as much unmodelled error as its own step whenever the
+policy reverses direction. Prefer 2-3 degree steps, or keep the previous action
+in the observation so the policy can learn the hysteresis, or approach from one
+direction only.
+
+For training, real-hardware pixel RL from scratch is impractical at 2-3 Hz.
+The figures above are exactly what a simulator needs: the URDF and a MoveIt
+config already exist, so inject 1.0 degree of backlash, 300 ms of latency,
+300-500 ms control periods and 0.3 degrees of amplitude error, train there, and
+transfer. Alternatively collect demonstrations with `teleop_view.py` and clone
+them before fine-tuning on hardware.
+
+## Reproducing
+
+```powershell
+python .\pc_client\arm_diagnostics.py --test coupling
+python .\pc_client\arm_diagnostics.py --test sweep
+python .\pc_client\arm_diagnostics.py --test step
+python .\pc_client\arm_diagnostics.py --test hold
+```
+
+These move the arm. Re-run them after any firmware change or mechanical work.
