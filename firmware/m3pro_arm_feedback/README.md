@@ -66,23 +66,15 @@ also been downloaded locally as
 checksum is recorded in `SOURCE_HASHES.txt`. The `vendor` directory is excluded
 from Git because these third-party packages are large.
 
-STM32CubeProgrammer 2.19 is installed, but not where an earlier revision of
-this file claimed. `%LOCALAPPDATA%\STMicroelectronics\STM32CubeProgrammer` does
-not exist. The installer was run inside the OpenAI Codex MSIX container, so its
-writes were redirected into that package's private store:
+STM32CubeProgrammer 2.19 is installed per-user at:
 
 ```text
-%LOCALAPPDATA%\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\STMicroelectronics\STM32CubeProgrammer
+%LOCALAPPDATA%\STMicroelectronics\STM32CubeProgrammer
 ```
 
-The CLI there reports 2.19.0 and runs. The installer could not write
-system-wide registry entries or install its optional ST-LINK driver without
-elevation; neither is required for the documented CP2104/UART route.
-
-That location is owned by another application and disappears if it is reset or
-uninstalled. Before doing any actual flashing, reinstall from the local vendor
-copy to a normal path. Use the repository wrapper, which tries the standard
-per-user path, then the container path, then Program Files:
+The CLI reports 2.19.0 and runs. The optional ST-LINK driver was not installed;
+it is not required for the documented CP2104/UART route. Use the repository
+wrapper:
 
 ```powershell
 .\stm32-programmer.cmd -l uart
@@ -93,6 +85,20 @@ USB-to-UART (`10c4:ea60`, serial `02C4DDB5`) and maps it to
 `/dev/myserial -> /dev/ttyUSB0`. The factory micro-ROS agent normally owns this
 port at 2,000,000 baud, so it must be stopped before entering the ROM bootloader
 or attempting any programmer connection.
+
+On the assembled robot inspected on 2026-09-23, the only externally visible
+Type-C ports were the Jetson device-mode port and the `YB-MAE02-V1.0` voice
+module. The latter enumerates as CH340K (`1a86:7522`) and is **not** the motion
+control board. The CP2104 control-board connection remains internal through the
+Jetson USB hub.
+
+`tools/probe_stm32_bootloader.py` was run on the Jetson after temporarily
+stopping the agent. Four common DTR/RTS auto-reset/BOOT0 polarities produced no
+STM32 ROM bootloader ACK; the original MCU application and ROS nodes recovered
+normally. This board therefore cannot currently be put into the ROM bootloader
+through CP2104 modem-control signals alone. Physical access to the control
+board's BOOT0 and RESET buttons is still required unless a documented software
+bootloader entry mechanism is found.
 
 Before the first write, read and save the currently installed flash if the
 programmer permits it; then verify that the official rollback HEX can at least
