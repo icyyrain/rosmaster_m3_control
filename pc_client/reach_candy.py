@@ -56,6 +56,26 @@ J_ALIGN = numpy.array([[-11.70, 0.63],    # dx from joint1, joint4
 ALIGN_JOINTS = (0, 3)   # joint1, joint4
 APPROACH_JOINT = 1      # joint2 sets reach
 
+# All four columns, needed to predict where the target will land after a
+# commanded move. Gating a tracker on the *previous* position fails as soon as
+# the arm makes a large move: one descent waypoint changes joints 2 and 3 by
+# 17 and 11 degrees, which shifts the image by about 412 px, far beyond any
+# sane jump limit. Predicting first keeps the gate tight without losing track.
+J_FULL = numpy.array([[-11.70, 0.42, 0.86, 0.63],
+                      [1.55, 13.80, 16.09, 14.34]])
+
+
+def predict_target(previous_px, joint_delta):
+    """Where a tracked point should move to after a joint change.
+
+    joint_delta is degrees for joints 1-4. Returns the predicted pixel, or None
+    if there was nothing to predict from.
+    """
+    if previous_px is None:
+        return None
+    shift = J_FULL @ numpy.asarray(joint_delta, dtype=numpy.float64)
+    return previous_px[0] + float(shift[0]), previous_px[1] + float(shift[1])
+
 # Depth intrinsics, for turning a depth pixel into millimetres.
 DEPTH_SCALE = 2.0  # colour is 1280x720, depth 640x360, same field of view.
 

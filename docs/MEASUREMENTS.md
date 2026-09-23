@@ -415,6 +415,84 @@ A later probe at the same pose in different light gave open 5628 px and closed
 13420 px, both shifted by roughly 300 px, while the signal came out at 7798 px
 against the stored 7786. The background really does cancel.
 
+## Picking the sweet up
+
+Done on hardware. Alignment, descent, grasp, lift, release.
+
+| stage | result |
+| --- | --- |
+| visual alignment | 7 steps, target at 265 mm |
+| descent | **20 waypoints, target never lost**, gripper 199 -> 49 mm above the table, target range 265 -> 123 mm |
+| final creep | 5 half-steps, target range inside the gripper's own 112 mm |
+| clamp and lift | **held** |
+| lower and release | **released** |
+
+### The tracker needed a motion model
+
+A first descent attempt lost the target immediately. The detector gated new
+detections within 200 px of the previous one, which had fixed an earlier
+rival-blob failure, but one descent waypoint moves joints 2 and 3 by 17 and 11
+degrees and so shifts the image by about 412 px. Every correct detection was
+rejected.
+
+The fix is `predict_target`: apply the full four-column Jacobian to the joint
+change about to be commanded, and gate around the predicted pixel rather than
+the last observed one. That keeps the gate tight enough to still reject the
+539 px rival jump that broke the alignment loop, while following arbitrarily
+large commanded motion. Across the 20 descent waypoints, predictions landed
+within about 20 px of observations throughout.
+
+### Depth runs out before contact, and the model stops short
+
+Two things the approach had to work around.
+
+The FK goal, computed from the target's vision-estimated position, stops about
+20 mm high, because that estimate sits that far above the real object. The
+stopping rule is therefore the gripper's measured height above the fitted table
+plane, which tracked 199 mm down to 49 mm and agreed with FK to 14.5 mm.
+
+Below roughly 120 mm the depth stream stops being usable, and at the final pose
+the depth frame was **0% valid** across the whole image, not merely near the
+target. Most likely the wrist occludes the depth module at that posture. So the
+last few millimetres are necessarily open loop on range, guided by the colour
+image alone.
+
+Ranging by blob area was tried as a substitute and **does not work**: over a
+262-290 mm sweep, `area * Z^2` scattered by 15% and a free exponent fit gave
+n = -0.54 where the inverse-square law needs -2.00. At nearly equal range the
+area read 589 px and 881 px. The wrapper is specular, so the a* mask catches a
+fraction that changes with viewing angle.
+
+### Joint 2 cannot close the gap by itself
+
+Measured: joint 2 changes the target's range by only about 1.4 mm per degree at
+the aligned pose, so closing 187 mm would need 134 degrees and the travel does
+not exist. Reaching requires a large posture change, which is also why a
+Jacobian linearised at the aligned pose cannot get there. FK found the grasp
+pose 102 degrees away on joint 2 alone.
+
+### How the grasp was confirmed
+
+Not by the dark-area signal. At the grasp pose it read 11008 px against an
+empty-air reference of 7786, larger rather than smaller, because the strip's
+background had changed completely. `verdict()` correctly reported "re-measure
+the reference" instead of claiming anything. **The dark-area reference does not
+transfer across large posture changes**; it has to be re-taken at the working
+pose.
+
+The reliable test is kinematic, and it works in both directions. Lifting moved
+joint 2 by +87 degrees and joint 3 by -52, which by the Jacobian displaces a
+stationary object by (-8, +364) px, taking it off the bottom of a 720-row
+frame. The target moved (+9, -20) px and stayed within 79 px of the gripper
+pixel: held.
+
+Releasing inverted the test. Lowering with the sweet held moved joints 2 and 3
+by -72 and +42 degrees, predicting -318 px for a stationary object; the target
+moved 1 px. Opening the jaws then jumped it from (699, 600) to (864, 689) with
+its area falling from 7135 to 2535, and on retraction it finally drifted as
+predicted, 58 px from the prediction at the first step and out of frame after
+that. Exactly what a sweet sitting on the desk should do.
+
 ## What this means for reinforcement learning
 
 Usable today, without touching the firmware, for **visual servoing**: the
