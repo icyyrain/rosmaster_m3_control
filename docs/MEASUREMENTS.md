@@ -692,6 +692,58 @@ preflight refuses the run when colour cannot see the object, because then
 nothing can track it through the grasp. A genuinely non-red object needs an
 appearance tracker, which is not implemented and is the honest gap here.
 
+### Does the keyboard interfere?
+
+No, and with a large margin: it measures 201 x 188 mm against a 60 mm size
+limit. But the size filter is thinner than that makes it sound, and it was not
+doing as much of the work as it appeared to.
+
+Measured on the desk, the size filter alone left **six** candidates:
+
+| area | size mm | top mm | colour px | verdict |
+| --- | --- | --- | --- | --- |
+| 39012 | 200.7 x 188.3 | 35.2 | (288, 200) | too big, the keyboard |
+| 4064 | 46.6 x **61.3** | 29.4 | (58, 646) | too big, by 1.3 mm |
+| 771 | 20.0 x 53.6 | 20.3 | (18, 225) | passes |
+| **699** | **18.5 x 34.6** | 27.9 | **(696, 438)** | **passes, the sweet** |
+| 197 | 22.0 x 13.2 | 10.8 | (26, 312) | passes |
+| 125 | 8.1 x 14.5 | 17.0 | (9, 415) | passes |
+
+Note where the spurious passers are: x = 9, 18, 25, 26, 64. All at the extreme
+left edge, so they are the monitor and the frame border, not objects on the
+table. The sweet was winning only on "nearest the frame centre", which is a
+convention rather than a measurement: a mug placed centrally would have won
+instead. And the 61.3 mm object missed the size cut by 1.3 mm.
+
+So `WORKING_AREA` was added, accepting only the central 60% of the frame:
+
+```text
+objects on the plane      : 8
+after the size filter     : 6  at [(64,661), (19,228), (25,567), (695,438), (10,299), (7,415)]
+after the working area too: 1  at [(695,438)]
+```
+
+Six candidates down to one, excluded by construction rather than by a tie
+break, and the one left is the sweet: the independent colour detector put it at
+(704, 427) against the depth detector's (695, 438), nine pixels apart.
+
+### What actually generalised
+
+Only acquisition and sizing. Tracking did not, and that bounds the whole
+feature: a genuinely non-red object can be found and measured but not followed
+through the grasp, so preflight refuses the run. The gap is an appearance
+tracker, and it is not implemented.
+
+### What changed for the original red-sweet task
+
+Very little, deliberately. With default flags the detection call is the same
+`reach_candy.find_target`, and align, creep, grip, travel and place are
+untouched. `descend` differs only in reading the waypoint count from an
+argument whose default is the previous constant, and every settling wait is
+multiplied by a factor that defaults to 1.0, so the timing is identical. The
+one behavioural change is that preflight now runs first and can refuse to
+start.
+
 ### Preflight
 
 Eleven checks before anything moves, each printed with its evidence:

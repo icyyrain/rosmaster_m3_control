@@ -243,18 +243,40 @@ def find_objects(depth, rng, min_height=OBJECT_MIN_HEIGHT_MM,
     return found
 
 
+# Working area, as a fraction of the colour frame, inside which a target is
+# accepted. This does more of the discrimination than it looks. On one desk the
+# size filter alone left four candidates: the sweet 96 px from the frame centre,
+# and three fragments at x = 9, 18 and 26, which are the monitor and the frame
+# edge rather than objects on the table. The sweet won only on "nearest the
+# centre", a convention rather than a measurement. Restricting to the central
+# band excludes the edge fragments by construction.
+WORKING_AREA = (0.20, 0.80, 0.20, 0.80)   # x_min, x_max, y_min, y_max
+FRAME_PX = (1280.0, 720.0)
+
+
+def in_working_area(colour_px, area=WORKING_AREA, frame=FRAME_PX):
+    x_min, x_max, y_min, y_max = area
+    return (x_min * frame[0] <= colour_px[0] <= x_max * frame[0]
+            and y_min * frame[1] <= colour_px[1] <= y_max * frame[1])
+
+
 def pick_graspable(objects, max_width_mm=60.0, min_width_mm=8.0,
-                   min_top_mm=8.0, centre_px=(640.0, 360.0)):
+                   min_top_mm=8.0, centre_px=(640.0, 360.0),
+                   working_area=WORKING_AREA):
     """Choose the object most likely to be the intended target.
 
-    Geometry alone returns every object on the table, including the keyboard.
-    Size filters it down, and nearness to the frame centre breaks the remaining
-    ties, because the operator puts the target in front of the arm.
+    Geometry alone returns everything standing on the table, the keyboard
+    included. The keyboard is thrown out robustly, at 201 x 188 mm against a
+    60 mm limit. The size filter is thinner than it looks though: one desk
+    object measured 61.3 mm and missed by 1.3 mm. So the working area does the
+    rest of the work, and nearness to the centre only breaks what is left.
     """
     candidates = [o for o in objects
                   if min_width_mm <= o['width_mm'] <= max_width_mm
                   and min_width_mm <= o['depth_mm'] <= max_width_mm
-                  and o['top_mm'] >= min_top_mm]
+                  and o['top_mm'] >= min_top_mm
+                  and (working_area is None
+                       or in_working_area(o['colour_px'], working_area))]
     if not candidates:
         return None
     return min(candidates, key=lambda o: (
