@@ -615,6 +615,38 @@ The kinematic test is the one to trust for confirmation. It needs no
 calibration that can drift, only the Jacobian, and it gave a margin of one to
 two orders of magnitude in both directions.
 
+## The whole sequence, as one tool
+
+`pc_client/pick_and_place.py` runs align, descend, creep, grip, verify, place
+and home. Verified end to end on the sweet, with the grip set from the aperture
+calibration rather than slammed shut.
+
+| phase | steps | outcome |
+| --- | --- | --- |
+| align | 1 | target already within tolerance |
+| descend | 20 | gripper 178 -> 47.9 mm above the table, range 238 -> 120 mm, target never lost |
+| creep | 5 | depth dropped out after step 2, as expected below 120 mm |
+| grip | 1 | joint6 162, aperture 23.0 mm, for a 28 mm object squeezed 5 mm |
+| lift | 3 | moved 13, 2, 2 px where a stationary object would move 108, 81, 175 |
+| lower | 3 | moved 1, 1 px against 175, 81: still held |
+| release | 3 | 91 px against 81 expected, then out of frame: released |
+
+The two verdicts are the same test run in opposite directions, and both gave
+one to two orders of magnitude of margin.
+
+Object size is reported during align. Height above the fitted plane is
+trustworthy, reading 26.1-26.6 mm for a sweet measured at 28 mm. The colour
+blob's apparent width is **a lower bound only**: the a* mask covers just the
+red enough part, and the same sweet came out at 18.2 mm, which fed to
+`grip_command` would ask for a 13 mm aperture and crush it. It is printed to
+check the detection, not to set the grip.
+
+Two rough edges left in the tool, both noted in the code. The FK grasp pose
+`GOAL_J2, GOAL_J3 = 18, 62` was computed for a target at roughly 265 mm from
+the aligned pose, so a target at a very different distance needs it recomputed.
+And the descent ladder assumes the object sits on a flat table that the depth
+plane fit can find.
+
 ## What this means for reinforcement learning
 
 Usable today, without touching the firmware, for **visual servoing**: the

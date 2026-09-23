@@ -407,7 +407,37 @@ python .\pc_client\gripper_state.py --mode grip --assume-pose 90 18 62 23 90 90 
 图像位移，再看目标是否跟着夹爪。它不依赖任何会漂移的标定，实测两个方向上都有一到两
 个数量级的余量。
 
-### 11. 机械臂命令
+### 11. 完整抓取流程
+
+`pc_client/pick_and_place.py` 把整条流程写成了一个工具：对齐 → 下降 → 逼近 → 夹持
+→ 抬起验证 → 放回 → 归位。默认 dry-run，只打印检测结果和第一步会发什么：
+
+```powershell
+python .\pc_client\pick_and_place.py
+python .\pc_client\pick_and_place.py --execute --width-mm 28 --squeeze-mm 5
+```
+
+五个阶段，每一个都是因为更简单的版本在实机上失败过才长成这样：
+
+| 阶段 | 做什么 | 为什么不能更简单 |
+| --- | --- | --- |
+| align | 用雅可比驱动关节 1、4，把目标对到夹爪像素 | 只是指向，不降臂 |
+| descend | 关节 2、3 沿 FK 路径插值，1、4 持续对准 | 纯图像伺服补不上 187mm（关节 2 只有 1.4mm/度） |
+| creep | 半步逼近最后几毫米 | 深度在 120mm 以下失效，这段必然开环 |
+| grip | 按物体宽度算开口 | 舵机无力反馈，180 会压碎、120 碰不到 |
+| verify | 抬起，看目标是否跟着走 | 暗面积信号跨姿态不可用 |
+
+`--squeeze-mm` 是力度旋钮。`--keep-holding` 可以夹住不放（但舵机是堵转保持，别放久）。
+
+对齐阶段会顺便报告物体尺寸。**高度可信**（糖实测 26.1–26.6mm，实际 28mm），但
+"red blob at least N wide" 是**下界**而非测量值 —— a\* 掩膜只覆盖足够红的部分，同一颗
+糖只算出 18.2mm，照它设 `--width-mm` 会要求 13mm 开口从而压碎。它只用于核对检测，
+不要用来设夹持。
+
+`pc_client/table_plane.py` 提供下降阶段的安全信号：拟合桌面平面，算出夹爪高出桌面
+多少。它**不使用目标自身的测距**，因为那个估计偏高约 36mm。与 FK 交叉验证差 14.5mm。
+
+### 12. 机械臂命令
 
 原厂命令格式如下，执行后机械臂会真实运动：
 
@@ -533,7 +563,9 @@ python .\pc_client\safe_command.py --joints 90 90 90 90 90 90 --time-ms 200
   - `vision_metrology.py`：以场景为参考的差分图像位移测量，精度高一个量级。
   - `arm_diagnostics.py`：机械臂特性测量（会让机械臂运动）。
   - `reach_candy.py`：视觉伺服闭环，把红色目标对准夹爪，默认 dry-run。
-  - `gripper_state.py`：从摄像头读夹爪开合并判断是否夹到东西。
+  - `gripper_state.py`：夹爪开口标定与夹持力度设定。
+  - `table_plane.py`：拟合桌面平面，测夹爪离桌面的高度。
+  - `pick_and_place.py`：完整抓取流程，默认 dry-run。
 - `docs/MEASUREMENTS.md`：相机与机械臂的实测数据、方法学陷阱和对强化学习的结论。
 - `docs/IMPLEMENTATION_PLAN.md`：架构、构建步骤和安全约束。
 - `firmware/m3pro_arm_feedback`：官方 STM32 示例的反馈补丁、校验值和实验 HEX。
