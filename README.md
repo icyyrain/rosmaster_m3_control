@@ -417,6 +417,19 @@ python .\pc_client\pick_and_place.py
 python .\pc_client\pick_and_place.py --execute --width-mm 28 --squeeze-mm 5
 ```
 
+加 `--record` 会把整次运行的彩色相机画面录成约 10 fps 的 MP4（无音频），从 preflight
+一直录到归位或异常退出。不给路径时自动保存到带时间戳的 `recordings` 目录，也可以指定：
+
+```powershell
+python .\pc_client\pick_and_place.py --record
+python .\pc_client\pick_and_place.py --execute --colour red-sat --detector table --auto-width --record
+python .\pc_client\pick_and_place.py --execute --record .\recordings\sweet-trial.mp4
+```
+
+录像复用控制程序已有的相机订阅，不会额外拉一份 WebSocket 视频流；编码在后台线程进行，
+写盘来不及时宁可丢录像帧，也不会等待录像而拖慢视觉闭环。结束时会打印保存路径、写入帧数
+和丢帧数。
+
 五个阶段，每一个都是因为更简单的版本在实机上失败过才长成这样：
 
 | 阶段 | 做什么 | 为什么不能更简单 |

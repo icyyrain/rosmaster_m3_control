@@ -58,10 +58,15 @@ touches nothing.
 """
 
 import argparse
+import base64
 import math
+from pathlib import Path
+import queue
 import sys
+import threading
 import time
 
+import cv2
 import numpy
 
 import arm_control
@@ -126,6 +131,94 @@ GRIPPABLE_MM = (8.0, 60.0)
 # monitor, a shadow or a sleeve, and accepting one as the target is how a run
 # ends up reporting a 198017 px "target" at the edge of the image.
 MAX_PLAUSIBLE_AREA_PX = 60000
+RECORD_FPS = 10.0
+
+
+def recording_path(spec):
+    """Resolve --record to an absolute MP4 path."""
+    if spec == 'auto':
+        result = Path('recordings') / time.strftime('pick-%Y%m%d-%H%M%S.mp4')
+    else:
+        result = Path(spec)
+        if not result.suffix:
+            result = result.with_suffix('.mp4')
+        elif result.suffix.lower() != '.mp4':
+            raise ValueError('--record output must use the .mp4 extension')
+    return result.resolve()
+
+
+class VideoRecorder(object):
+    """Write compressed colour messages to MP4 without blocking rosbridge."""
+
+    def __init__(self, path, fps=RECORD_FPS):
+        self.path = Path(path)
+        self.fps = float(fps)
+        self.frames = 0
+        self.dropped = 0
+        self.error = None
+        self._queue = queue.Queue(maxsize=30)
+        self._sentinel = object()
+        self._closed = False
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._thread = threading.Thread(
+            target=self._write_loop, name='pick-video-writer', daemon=True)
+        self._thread.start()
+        print('recording colour video to {}'.format(self.path))
+
+    def submit(self, payload_b64):
+        if self._closed or self.error is not None:
+            return
+        try:
+            self._queue.put_nowait(payload_b64)
+        except queue.Full:
+            self.dropped += 1
+
+    def _write_loop(self):
+        writer = None
+        try:
+            while True:
+                payload = self._queue.get()
+                if payload is self._sentinel:
+                    break
+                raw = base64.b64decode(payload)
+                frame = cv2.imdecode(numpy.frombuffer(raw, numpy.uint8), cv2.IMREAD_COLOR)
+                if frame is None:
+                    self.dropped += 1
+                    continue
+                if writer is None:
+                    height, width = frame.shape[:2]
+                    writer = cv2.VideoWriter(
+                        str(self.path), cv2.VideoWriter_fourcc(*'mp4v'),
+                        self.fps, (width, height))
+                    if not writer.isOpened():
+                        raise RuntimeError('OpenCV could not open the MP4 video writer')
+                writer.write(frame)
+                self.frames += 1
+        except Exception as error:
+            self.error = error
+        finally:
+            if writer is not None:
+                writer.release()
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        while self._thread.is_alive():
+            try:
+                self._queue.put(self._sentinel, timeout=0.25)
+                break
+            except queue.Full:
+                continue
+        self._thread.join(timeout=15.0)
+        if self._thread.is_alive():
+            print('WARNING: video writer did not finish flushing {}'.format(self.path))
+        elif self.error is not None:
+            print('WARNING: recording failed: {}'.format(self.error))
+        else:
+            suffix = ', {} frame(s) dropped'.format(self.dropped) if self.dropped else ''
+            print('saved recording: {} ({} frames at {:.1f} fps{})'.format(
+                self.path, self.frames, self.fps, suffix))
 
 
 def parse_args():
@@ -182,6 +275,9 @@ def parse_args():
     parser.add_argument('--keep-holding', action='store_true',
                         help='Stop after verifying the grasp instead of putting '
                              'the object back down.')
+    parser.add_argument('--record', nargs='?', const='auto', metavar='PATH',
+                        help='Record the colour camera to MP4. With no PATH, save '
+                             'recordings/pick-YYYYMMDD-HHMMSS.mp4.')
     parser.add_argument('--execute', action='store_true',
                         help='Actually move. Without this nothing is sent.')
     args = parser.parse_args()
@@ -198,7 +294,17 @@ class Session(object):
         self.args = args
         self.client = arm_control.connect(args.host, args.port)
         self.link = arm_control.ArmLink(self.client, args.execute)
-        self.streams = reach_candy.Streams(self.client)
+        self.recorder = None
+        if args.record is not None:
+            try:
+                self.recorder = VideoRecorder(recording_path(args.record))
+            except ValueError as error:
+                self.link.close()
+                self.client.terminate()
+                raise SystemExit(str(error))
+        self.streams = reach_candy.Streams(
+            self.client,
+            colour_sink=self.recorder.submit if self.recorder is not None else None)
         self.rng = numpy.random.default_rng(31)
         self.pose = list(arm_control.HOME_POSE)
         self.last_px = None
@@ -217,6 +323,8 @@ class Session(object):
 
     def close(self):
         self.streams.close()
+        if self.recorder is not None:
+            self.recorder.close()
         self.link.close()
         self.client.terminate()
 
