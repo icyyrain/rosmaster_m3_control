@@ -31,6 +31,12 @@ Tests:
             pre-move reference exaggerates the wander roughly twentyfold
             because the inlier count collapses.
 
+  jacobian  How each of joints 1-4 moves image content at the centre. This is
+            what a visual servo controller needs. Reports the matrix, its null
+            space and the conditioning of each joint pair, because the 2x4 is
+            rank 2 and driving four joints from a pixel error lets posture
+            drift uncontrolled.
+
 Results measured on 2026-09-23 are recorded in docs/MEASUREMENTS.md.
 """
 
@@ -76,7 +82,7 @@ def parse_args():
     parser.add_argument('--host', default='192.168.2.4')
     parser.add_argument('--port', type=int, default=9090)
     parser.add_argument('--test', required=True,
-                        choices=('coupling', 'sweep', 'step', 'hold'))
+                        choices=('coupling', 'sweep', 'step', 'hold', 'jacobian'))
     parser.add_argument('--yes', action='store_true',
                         help='Skip the interactive confirmation.')
     return parser.parse_args()
@@ -292,11 +298,137 @@ def test_hold(link, camera):
     print('holding position and not hunting.')
 
 
+def test_jacobian(link, camera):
+    """Image Jacobian: how each of joints 1-4 moves content at the image centre.
+
+    This is what a visual servo controller needs. It is not a diagonal: each
+    joint produces a direction in the image, so the useful object is a 2x4
+    matrix mapping joint degrees to pixel motion, plus a roll row because
+    joint 1 rotates the image noticeably.
+
+    Two deliberate choices. Displacement is evaluated at the image centre
+    rather than taken from the affine translation, which refers to the
+    top-left corner and is inflated by any rotation. And each measurement
+    point is approached while moving in the same direction, with a central
+    difference around the base pose, so the 1 degree of backlash does not
+    land inside the measurement.
+
+    The Jacobian is configuration dependent, so it is reported for the stated
+    base pose. A constant approximation is normally good enough for image
+    based servoing provided the gain stays conservative.
+    """
+    delta = 3
+    base = arm_control.clamp_pose([90, 120, 10, 10, 90, 90])
+    print('base pose for this measurement: {}, step +-{} deg'.format(base, delta))
+    print('(joints 3 and 4 sit at 0 at home, so they are lifted to 10 for headroom)')
+    print()
+
+    link.send(base, arm_control.HOMING_TIME_MS)
+    time.sleep(arm_control.HOMING_TIME_MS / 1000.0 + 1.5)
+
+    anchor = vm.reference_of(camera.grab())
+    if anchor is None:
+        print('no usable anchor frame')
+        return
+    still = vm.shift_of(anchor, camera.grab())
+    print('anchor: {} features, still-frame residual {:.3f} px'.format(
+        len(anchor[0]), still.magnitude if still else float('nan')))
+    print()
+
+    def goto(index, value, duration=800, settle=1.4):
+        pose = list(base)
+        pose[index] = value
+        link.send(arm_control.clamp_pose(pose), duration)
+        time.sleep(settle)
+
+    def measure():
+        best = None
+        for _ in range(4):
+            result = vm.shift_of(anchor, camera.grab())
+            if result is not None and (best is None or result.inliers > best.inliers):
+                best = result
+            time.sleep(0.1)
+        return best
+
+    print('{:<8} {:>10} {:>10} {:>10} {:>10} {:>9} {:>8}'.format(
+        'joint', 'dx-/deg', 'dy-/deg', 'dx+/deg', 'dy+/deg', 'roll/deg', 'inliers'))
+    print('-' * 70)
+
+    columns = []
+    for index in range(4):
+        start = base[index]
+        # Arrive at both sample points while travelling upward.
+        goto(index, start - 2 * delta)
+        goto(index, start - delta)
+        low = measure()
+        goto(index, start + delta)
+        high = measure()
+
+        if low is None or high is None:
+            print('joint{}  lost tracking'.format(index + 1))
+            columns.append((float('nan'), float('nan'), float('nan')))
+        else:
+            lx, ly = low.displacement_at()
+            hx, hy = high.displacement_at()
+            jx = (hx - lx) / (2.0 * delta)
+            jy = (hy - ly) / (2.0 * delta)
+            jr = (high.roll_deg - low.roll_deg) / (2.0 * delta)
+            columns.append((jx, jy, jr))
+            print('joint{:<3} {:>10.2f} {:>10.2f} {:>10.2f} {:>10.2f} {:>9.3f} {:>8}'.format(
+                index + 1, lx / -delta, ly / -delta, hx / delta, hy / delta, jr,
+                min(low.inliers, high.inliers)))
+
+        # Restore, again arriving upward.
+        goto(index, start - 2 * delta)
+        goto(index, start)
+
+    print('-' * 70)
+    print()
+    print('Image Jacobian at that pose, px per degree of joint command:')
+    print()
+    print('{:>10} {:>10} {:>10} {:>10} {:>10}'.format('', 'joint1', 'joint2', 'joint3', 'joint4'))
+    for row, label in enumerate(('dx', 'dy')):
+        print('{:>10} {:>10.2f} {:>10.2f} {:>10.2f} {:>10.2f}'.format(
+            label, *[columns[c][row] for c in range(4)]))
+    print('{:>10} {:>10.3f} {:>10.3f} {:>10.3f} {:>10.3f}'.format(
+        'roll deg', *[columns[c][2] for c in range(4)]))
+
+    matrix = numpy.array([[columns[c][0] for c in range(4)],
+                          [columns[c][1] for c in range(4)]])
+    if numpy.isnan(matrix).any():
+        print('\nincomplete Jacobian; not inverting')
+        return
+
+    print()
+    print('magnitude per joint: {}'.format('  '.join(
+        'j{} {:.2f} px/deg'.format(i + 1, numpy.linalg.norm(matrix[:, i]))
+        for i in range(4))))
+    singular = numpy.linalg.svd(matrix, compute_uv=False)
+    print('singular values {:.2f} / {:.2f}, condition {:.1f}'.format(
+        singular[0], singular[1], singular[0] / max(singular[1], 1e-9)))
+
+    pinv = numpy.linalg.pinv(matrix)
+    print()
+    print('Control law: joint_delta_deg = pinv @ pixel_error, with pinv =')
+    for row in range(4):
+        print('   joint{}: {:+8.5f} * ex  {:+8.5f} * ey'.format(
+            row + 1, pinv[row, 0], pinv[row, 1]))
+    example = numpy.array([100.0, 50.0])
+    delta_q = pinv @ example
+    print()
+    print('Worked example: to move content by ({:.0f}, {:.0f}) px, command'.format(*example))
+    print('   {}'.format('  '.join(
+        'j{} {:+.2f} deg'.format(i + 1, delta_q[i]) for i in range(4))))
+    print('Apply a gain well under 1 and iterate; the pseudo-inverse spreads the')
+    print('motion over all four joints, which is rarely what you want in one hop.')
+
+
 TESTS = {
     'coupling': test_coupling,
     'sweep': test_sweep,
     'step': test_step,
     'hold': test_hold,
+    'jacobian': test_jacobian,
 }
 
 

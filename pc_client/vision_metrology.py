@@ -59,20 +59,35 @@ def reference_of(frame):
     return keypoints, descriptors
 
 
+DEFAULT_CENTRE = (640.0, 360.0)  # Centre of the 1280x720 colour frame.
+
+
 class Shift(object):
-    """Global image motion of a frame relative to a reference."""
+    """Global image motion of a frame relative to a reference.
 
-    __slots__ = ('dx', 'dy', 'roll_deg', 'inliers')
+    Beware which point the translation refers to. `dx`/`dy` come straight from
+    the affine fit, so they describe the displacement at the image ORIGIN, the
+    top-left corner. Whenever the transform also rotates, that figure is
+    inflated by the rotation acting over the distance to the origin: joint 1
+    measured 11.8 px per degree by median inlier displacement but 18.8 px per
+    degree by origin translation, purely from this effect.
 
-    def __init__(self, dx, dy, roll_deg, inliers):
+    For anything that reasons about where content actually moved, including any
+    image Jacobian, use `displacement_at` with the point of interest.
+    """
+
+    __slots__ = ('dx', 'dy', 'roll_deg', 'inliers', 'matrix')
+
+    def __init__(self, dx, dy, roll_deg, inliers, matrix=None):
         self.dx = dx
         self.dy = dy
         self.roll_deg = roll_deg
         self.inliers = inliers
+        self.matrix = matrix
 
     @property
     def magnitude(self):
-        """Translation magnitude in px, taken at the image origin."""
+        """Translation magnitude in px at the image origin."""
         return math.hypot(self.dx, self.dy)
 
     @property
@@ -80,8 +95,19 @@ class Shift(object):
         """Magnitude carrying the sign of the x component, for sweeps."""
         return math.copysign(self.magnitude, self.dx)
 
+    def displacement_at(self, point=DEFAULT_CENTRE):
+        """How far image content at `point` moved, in px, as (dx, dy).
+
+        This is the number to build a Jacobian from.
+        """
+        if self.matrix is None:
+            return self.dx, self.dy
+        x, y = point
+        moved = self.matrix @ numpy.array([x, y, 1.0])
+        return float(moved[0] - x), float(moved[1] - y)
+
     def __repr__(self):
-        return 'Shift({:.2f} px, roll {:.3f} deg, {} inliers)'.format(
+        return 'Shift(origin {:.2f} px, roll {:.3f} deg, {} inliers)'.format(
             self.magnitude, self.roll_deg, self.inliers)
 
 
@@ -111,7 +137,7 @@ def shift_of(reference, frame):
     if count < MIN_INLIERS:
         return None
     return Shift(float(matrix[0, 2]), float(matrix[1, 2]),
-                 math.degrees(math.atan2(matrix[1, 0], matrix[0, 0])), count)
+                 math.degrees(math.atan2(matrix[1, 0], matrix[0, 0])), count, matrix)
 
 
 class Camera(object):

@@ -21,6 +21,33 @@ So the camera is eye-in-hand. Its view is a function of joints 1-4. Joint 5
 (`arm5_Joint`, wrist roll) and the gripper (`rlink1_Joint`) are downstream of
 arm4 and do not move it.
 
+Two things that sound the same but are not. Joint 5 and the gripper do not
+*move the camera*, so their angles cannot be inferred from the image
+transform. They are nevertheless *inside the field of view*: the gripper hangs
+in front of an arm4 mounted camera and appears along the bottom edge of the
+frame. Measured by holding joints 1-4 fixed and toggling each:
+
+| toggled | pixels changed | largest region |
+| --- | --- | --- |
+| nothing (control) | 1020 px | noise |
+| gripper open vs closed | 12409 px (1.35%) | 157x91 at 55% across, 94% down |
+| wrist roll 90 vs 150 | 71753 px (7.79%) | 359x244 at 42% across, 87% down |
+
+So the gripper is directly observable as pixels even though its angle is not
+recoverable from the global transform, and grasp state is likely checkable
+optically without a second camera. It sits at the very bottom of the frame and
+is partly cropped at the home pose, so whether it stays in view through a
+reaching motion needs checking per trajectory.
+
+Joint 5 also barely moves the gripper's *position*. Its axis is Z and the
+gripper offset from `arm5` is almost purely along that same Z
+(`0.093235` m in z against `0.000625`/`0.00024` in x/y), so a full revolution
+of joint 5 displaces the gripper origin by at most **0.88 mm**, with z
+unchanged. Gripper position is therefore set by joints 1-4 alone; only its roll
+depends on joint 5. For a reaching task, which is positional, the blind spot
+does not matter. The camera and gripper origins are 111.9 mm apart in the arm4
+frame.
+
 The URDF also carries a `Camera` link on `base_link` with zero limits. No
 matching USB device was present, so treat it as an unused mount.
 
@@ -63,6 +90,92 @@ does anything decides whether a one-degree action space is meaningful.
 
 Same-direction repeatability is excellent. A direction reversal costs about a
 full degree.
+
+## Image Jacobian
+
+Measured at base pose `[90, 120, 10, 10, 90, 90]`, which is home with joints 3
+and 4 lifted to 10 so they have room for a symmetric step. Joints 3 and 4 sit
+at 0 at home and cannot go negative.
+
+Displacement is evaluated at the image centre, not taken from the affine
+translation. The affine translation refers to the top-left corner and is
+inflated by any rotation, which is why joint 1 reads 18.8 px per degree that
+way but 11.8 px per degree at the centre. The centre figure is the one a
+controller needs.
+
+Each sample point was approached while travelling in the same direction, with a
+central difference about the base pose, so the 1 degree of backlash falls
+outside the measurement.
+
+Units are px per degree of joint command.
+
+| | joint1 | joint2 | joint3 | joint4 |
+| --- | --- | --- | --- | --- |
+| dx | -11.70 | +0.42 | +0.86 | +0.63 |
+| dy | +1.55 | +13.80 | +16.09 | +14.34 |
+| roll deg | -0.421 | +0.091 | +0.135 | +0.096 |
+
+The structure follows the kinematics exactly. Joint 1 turns about Z and pans
+the camera horizontally, also rolling the image by -0.42 degrees per degree.
+Joints 2, 3 and 4 turn about three parallel pitch axes and all tilt the camera
+vertically by a similar amount.
+
+### The matrix is rank 2, so do not drive four joints with a pixel error
+
+A 2x4 matrix of rank 2 leaves a two-dimensional null space. These joint
+combinations produce no image motion at all:
+
+```text
+[+0.03  -0.85  +1.00  -0.31]  ->  0.0000 px/deg
+[+0.01  -0.70  -0.29  +1.00]  ->  0.0000 px/deg
+```
+
+A pseudo-inverse will return the minimum-norm solution, but posture then
+drifts inside that null space over repeated iterations, uncontrolled.
+
+Conditioning of every two-joint subset:
+
+| subset | condition number | |
+| --- | --- | --- |
+| j1+j2 | 1.2 | good |
+| j1+j4 | 1.2 | good |
+| j1+j3 | 1.4 | good |
+| j2+j3 | 88.1 | degenerate |
+| j2+j4 | 148.5 | degenerate |
+| j3+j4 | 212.1 | degenerate |
+
+Joint 1 must be paired with exactly one of joints 2, 3 and 4. Any pair drawn
+from within that group is degenerate, because all three do nearly the same
+thing in the image.
+
+**j1 + j4** is the suggested pair: condition 1.2, and joint 4 is the wrist
+pitch, so it carries the least inertia and moves fastest for fine positioning.
+
+Since a pixel error cannot observe distance, and reaching is a
+three-dimensional task, the better arrangement uses the depth stream as a third
+error term and three joints, giving a square well-posed system: error
+`(ex, ey, e_depth)` against `(j1, j4, j2)`, with joint 2 setting reach.
+
+### Backlash, confirmed a second time
+
+The one-sided differences were markedly asymmetric. A constant offset between
+the anchor's true position and the nominal base pose inflates the low-side
+estimate and deflates the high-side estimate by the same factor, which
+recovers the offset:
+
+| | low side | high side | implied offset |
+| --- | --- | --- | --- |
+| j1 dx | 14.59 | 8.81 | 0.74 deg |
+| j2 dy | 19.22 | 8.39 | 1.18 deg |
+| j3 dy | 20.51 | 11.66 | 0.83 deg |
+| j4 dy | 20.17 | 8.51 | 1.22 deg |
+| | | mean | **0.99 deg** |
+
+The sweep test measured backlash as **0.996 deg** by a completely different
+route. Two independent experiments agreeing to two decimal places validates
+both the figure and the central-difference design, since the matrix entries are
+exactly the averages of the two one-sided estimates and are therefore immune to
+this offset.
 
 ## Step response
 
@@ -164,10 +277,12 @@ accurately, the camera sees the result. The loop closes without joint angles.
 
 Not usable for:
 
-- **Grasp confirmation.** The gripper is downstream of arm4 and invisible.
-  Workarounds that need no firmware: close, lift, and check optically whether
-  the object moved with the arm; or add a fixed second camera with a marker on
-  the gripper, which also recovers joint 5.
+- **Joint 5 angle and gripper opening angle**, which cannot be inferred from
+  the image transform. Grasp *confirmation* is a different matter and looks
+  feasible: the gripper is visible along the bottom of the frame, so the jaws
+  and whatever sits between them can be inspected directly. An earlier
+  revision of this file called grasp confirmation impossible, which conflated
+  "does not move the camera" with "cannot be seen".
 - **Stall and collision detection**, which needs servo feedback. Safety stays
   a human-in-the-loop matter, and `m3pro_arm_safety` should keep
   `require_feedback: true`.
@@ -194,6 +309,7 @@ python .\pc_client\arm_diagnostics.py --test coupling
 python .\pc_client\arm_diagnostics.py --test sweep
 python .\pc_client\arm_diagnostics.py --test step
 python .\pc_client\arm_diagnostics.py --test hold
+python .\pc_client\arm_diagnostics.py --test jacobian
 ```
 
 These move the arm. Re-run them after any firmware change or mechanical work.
