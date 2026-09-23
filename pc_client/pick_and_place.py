@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Pick a red object off the table and put it back, using vision only.
+"""Pick a coloured object off the table and put it back, using vision only.
 
 No learning, no joint feedback, no inverse kinematics at run time. Five phases,
 each of which exists because a simpler version of it failed on hardware. The
@@ -75,7 +75,36 @@ import table_plane
 GOAL_J2, GOAL_J3 = 18, 62
 
 CREEP_STEPS = 5
-HEIGHT_FLOOR_MM = 30.0
+
+# Where the gripper origin should end up, relative to the top of the object.
+# Anchored on the one grasp that worked: a 28 mm sweet was held when the creep
+# finished with the gripper origin 35-38 mm above the table, so the origin sits
+# roughly 8 mm above the object's top at a good grasp. One data point, so treat
+# it as a starting value rather than a calibration.
+#
+# It has to follow the object. Left fixed at the sweet's value, the descent
+# stopped 38.4 mm up while trying to grasp a 15.8 mm biscuit bar and closed the
+# jaws about 20 mm above it.
+GRASP_OFFSET_MM = 8.0
+HEIGHT_FLOOR_MM = 18.0          # absolute floor, whatever the object
+
+# How short an object this path can actually pick up. Empirical, and only two
+# points wide.
+#
+# An earlier version of this claimed a "reachable floor" of 38 mm, computed
+# from the lowest gripper height the descent ever reported. That was wrong: the
+# depth stream stops returning anything below about 120 mm of range, so the
+# height reading disappears while the arm is still descending. 38 mm was where
+# measurement stopped, not where motion stopped, and the check built on it
+# refused a sweet that had already been picked up twice.
+#
+# What is actually known: a 28 mm sweet was grasped successfully twice, and a
+# 15.9 mm biscuit bar failed twice, the creep running joint 2 out of travel
+# with the jaws closing about 20 mm above it. The true limit is somewhere
+# between, and finding it properly needs the FK goal re-solved per target,
+# which means carrying forward kinematics at run time.
+PROVEN_GRASP_HEIGHT_MM = 28.0
+FAILED_GRASP_HEIGHT_MM = 15.9
 ALIGN_TOLERANCE_PX = 25.0
 GATE_PX = 170.0
 
@@ -93,10 +122,15 @@ REACH_BAND_MM = (200.0, 340.0)
 # What the jaws can actually take, from the aperture calibration.
 GRIPPABLE_MM = (8.0, 60.0)
 
+# No graspable object fills this much of the frame. A blob this size is a
+# monitor, a shadow or a sleeve, and accepting one as the target is how a run
+# ends up reporting a 198017 px "target" at the edge of the image.
+MAX_PLAUSIBLE_AREA_PX = 60000
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Pick a red object off the table and put it back. Dry-run by default.')
+        description='Pick a coloured object off the table and put it back. Dry-run by default.')
     parser.add_argument('--host', default='192.168.2.4')
     parser.add_argument('--port', type=int, default=9090)
     parser.add_argument('--detector', choices=('red', 'table'), default='red',
@@ -105,8 +139,17 @@ def parse_args():
                              'any colour, then hand off to colour tracking, '
                              'which is the only thing that still sees the '
                              'object inside the depth dead zone.')
+    parser.add_argument('--colour', default='red',
+                        help='Which colour to chase: a name (red, blue, green, '
+                             'yellow, orange, pink, cyan, purple, magenta, '
+                             'red-sat), a literal Lab direction "dx,dy", or '
+                             '"@x,y" to sample the colour off that pixel of the '
+                             'object. Sampling is the robust choice for '
+                             'anything that is not an idealised colour.')
     parser.add_argument('--a-star', type=int, default=140,
-                        help='Lab a* threshold for "red". 128 is neutral.')
+                        help='Chroma threshold on the Lab a* scale, where 128 '
+                             'is neutral, so 140 means a chroma of 12. The same '
+                             'number applies whichever colour is chosen.')
     parser.add_argument('--min-area', type=int, default=150)
     parser.add_argument('--width-mm', type=float, default=28.0,
                         help='Object width, which sets the grip aperture.')
@@ -129,6 +172,10 @@ def parse_args():
                              'monitoring quality.')
     parser.add_argument('--skip-preflight', action='store_true',
                         help='Run anyway when a preflight check fails.')
+    parser.add_argument('--grasp-offset-mm', type=float, default=GRASP_OFFSET_MM,
+                        help='Where to stop the gripper origin above the top of '
+                             'the object. Anchored on one successful grasp, so '
+                             'raise it if the jaws hit the table.')
     parser.add_argument('--squeeze-mm', type=float, default=5.0,
                         help='How much narrower than the object to close. The '
                              'force knob; 5 mm held a sweet without marking it.')
@@ -157,6 +204,16 @@ class Session(object):
         self.last_px = None
         self.width_mm = args.width_mm
         self.acquired = False
+        self.colour = None          # resolved once a frame is available
+        self.colour_chroma = None
+        self.object_top_mm = None   # filled in by preflight
+        self.stop_height_mm = HEIGHT_FLOOR_MM
+
+    def set_object_top(self, top_mm):
+        """Derive the descent stop height from the object's own height."""
+        self.object_top_mm = top_mm
+        self.stop_height_mm = max(HEIGHT_FLOOR_MM,
+                                  top_mm + self.args.grasp_offset_mm)
 
     def close(self):
         self.streams.close()
@@ -167,6 +224,13 @@ class Session(object):
         self.pose = arm_control.clamp_pose(pose)
         self.link.send(self.pose, duration)
         time.sleep(max(0.15, settle * self.args.settle))
+
+    def resolve_colour(self):
+        """Turn --colour into a direction, sampling from a frame if asked."""
+        bgr = self.streams.colour()
+        self.colour, self.colour_chroma = reach_candy.parse_colour(
+            self.args.colour, bgr)
+        return self.colour
 
     def wait_for_depth(self, timeout=8.0):
         deadline = time.time() + timeout
@@ -206,31 +270,68 @@ class Session(object):
         if bgr is None:
             return None
         found = reach_candy.find_target(
-            bgr, self.args.a_star, self.args.min_area, predicted, max_jump=GATE_PX)
+            bgr, self.args.a_star, self.args.min_area, predicted,
+            max_jump=GATE_PX, colour=self.colour)
         if found is None:
             return None
         cx, cy, area, rivals = found
+        if area > MAX_PLAUSIBLE_AREA_PX:
+            return None
         return dict(cx=cx, cy=cy, area=area, rivals=rivals, width_mm=None,
                     range_mm=reach_candy.target_range_mm(self.streams.depth(), (cx, cy)))
 
     def _look_table(self, predicted):
-        depth = self.streams.depth()
-        objects = table_plane.find_objects(depth, self.rng)
-        if not objects:
-            return None
-        if predicted is None:
-            chosen = table_plane.pick_graspable(objects)
-        else:
-            near = [o for o in objects
-                    if ((o['colour_px'][0] - predicted[0]) ** 2
-                        + (o['colour_px'][1] - predicted[1]) ** 2) ** 0.5 <= GATE_PX]
-            chosen = table_plane.pick_graspable(near) if near else None
+        """Depth for geometry, colour for identity.
+
+        Depth alone chooses by size and centrality, which ignores what the
+        object is: with a sweet and a biscuit bar both on the table it picked
+        the sweet while --colour said blue, and preflight rightly refused the
+        run. So candidates are first required to match the requested colour,
+        and only then judged on size and position.
+        """
+        chosen, total = self.pick_object(predicted)
         if chosen is None:
             return None
         return dict(cx=chosen['colour_px'][0], cy=chosen['colour_px'][1],
-                    area=chosen['area_px'], rivals=len(objects) - 1,
-                    width_mm=max(chosen['width_mm'], chosen['depth_mm']),
+                    area=chosen['area_px'], rivals=total - 1,
+                    width_mm=table_plane.grip_width_mm(chosen),
                     range_mm=chosen['dist_mm'])
+
+    def pick_object(self, predicted=None):
+        """The depth object this run is about: colour first, then geometry.
+
+        Preflight and the tracker must agree on which object they mean. They
+        did not at first: preflight used geometry alone, so with a sweet and a
+        biscuit on the table it measured the biscuit, 16 mm tall, while
+        --colour red-sat tracked the 28 mm sweet. The stop height and
+        --auto-width were then set from the wrong object.
+        """
+        objects = table_plane.find_objects(self.streams.depth(), self.rng)
+        if not objects:
+            return None, 0
+        total = len(objects)
+        if predicted is not None:
+            objects = [o for o in objects
+                       if ((o['colour_px'][0] - predicted[0]) ** 2
+                           + (o['colour_px'][1] - predicted[1]) ** 2) ** 0.5 <= GATE_PX]
+        matching = self._colour_filter(objects)
+        return table_plane.pick_graspable(matching or objects), total
+
+    def _colour_filter(self, objects, window=12):
+        """Keep the objects whose pixels lean towards the requested colour."""
+        bgr = self.streams.colour()
+        if bgr is None or self.colour is None or not objects:
+            return objects
+        _, projection = reach_candy.chroma_mask(bgr, self.colour, 0)
+        threshold = self.args.a_star - 128
+        keep = []
+        for item in objects:
+            x, y = int(item['colour_px'][0]), int(item['colour_px'][1])
+            patch = projection[max(0, y - window):y + window + 1,
+                               max(0, x - window):x + window + 1]
+            if patch.size and float(numpy.percentile(patch, 75)) > threshold:
+                keep.append(item)
+        return keep
 
     def error_px(self, state):
         return (state['cx'] - reach_candy.GRIPPER_PX[0],
@@ -297,6 +398,14 @@ def preflight(session):
         results.append((name, ok, detail, fatal))
 
     check('colour stream', session.streams.colour() is not None, 'frames arriving')
+    try:
+        direction = session.resolve_colour()
+        detail = 'direction ({:+.3f}, {:+.3f})'.format(*direction)
+        if session.colour_chroma:
+            detail += ', sampled chroma {:.0f}'.format(session.colour_chroma)
+        check('colour resolved', True, detail)
+    except ValueError as error:
+        check('colour resolved', False, str(error))
     check('depth stream', session.wait_for_depth(), 'frames arriving')
 
     state = session.look()
@@ -309,6 +418,15 @@ def preflight(session):
         check('no rival detections', state['rivals'] == 0,
               '{} other candidate(s); the largest or nearest wins'.format(state['rivals']),
               fatal=False)
+
+        bgr = session.streams.colour()
+        if bgr is not None and session.colour is not None:
+            hit, background = reach_candy.colour_margin(
+                bgr, session.colour, (state['cx'], state['cy']))
+            if hit is not None:
+                check('colour separates the target', hit - background > 3.0,
+                      'target chroma {:.0f} against the frame 99.5th percentile '
+                      'of {:.0f}, margin {:+.0f}'.format(hit, background, hit - background))
 
         check('table plane found', state['height'] is not None,
               'gripper {:.0f} mm above the table, {} inliers'.format(
@@ -325,18 +443,40 @@ def preflight(session):
                   '{:.0f} mm against {:.0f}-{:.0f} mm; the FK descent path was '
                   'solved at 265 mm'.format(range_mm, *REACH_BAND_MM))
 
+        graspable, _ = session.pick_object()
         objects = table_plane.find_objects(session.streams.depth(), session.rng)
-        graspable = table_plane.pick_graspable(objects)
         if graspable is not None:
-            measured = max(graspable['width_mm'], graspable['depth_mm'])
+            measured = table_plane.grip_width_mm(graspable)
             check('object fits the jaws',
                   GRIPPABLE_MM[0] <= measured <= GRIPPABLE_MM[1],
-                  '{:.0f} mm measured from depth, jaws take {:.0f}-{:.0f} mm'.format(
-                      measured, *GRIPPABLE_MM))
+                  '{:.0f} mm across its narrow axis ({:.0f} x {:.0f}), jaws take '
+                  '{:.0f}-{:.0f} mm'.format(
+                      measured, graspable['width_mm'], graspable['depth_mm'],
+                      *GRIPPABLE_MM))
             check('object stands off the table', graspable['top_mm'] >= 8.0,
                   '{:.1f} mm tall'.format(graspable['top_mm']))
             if args.auto_width:
                 session.width_mm = measured
+            session.set_object_top(graspable['top_mm'])
+            top = graspable['top_mm']
+            check('tall enough to grasp', top >= PROVEN_GRASP_HEIGHT_MM - 2.0,
+                  '{:.1f} mm; {:.0f} mm has been picked up, {:.1f} mm failed twice '
+                  'with the jaws closing above it'.format(
+                      top, PROVEN_GRASP_HEIGHT_MM, FAILED_GRASP_HEIGHT_MM),
+                  fatal=False)
+
+            # Two independent measurements of the same object that ought to
+            # agree for anything roughly round. When they do not, the narrow
+            # axis is probably an underestimate, and --auto-width would then
+            # ask for too tight a grip: the sweet measured 21 mm across but
+            # 27 mm tall, and gripping it as 21 mm gives a 15 mm aperture.
+            if args.auto_width:
+                narrow = min(graspable['width_mm'], graspable['depth_mm'])
+                check('width estimate consistent', abs(narrow - top) <= 0.5 * top,
+                      'narrow axis {:.0f} mm, height {:.1f} mm, gripping as '
+                      '{:.0f} mm; the mask only sees the cap of a rounded object '
+                      'so the larger is used'.format(narrow, top, measured),
+                      fatal=False)
             # Compare an INDEPENDENT colour detection against depth. Comparing
             # the chosen detector against itself passes by construction and
             # tells us nothing, which is worse than having no check.
@@ -452,6 +592,10 @@ def creep(session, state):
     print('=== creep ===')
     for step in range(1, CREEP_STEPS + 1):
         j1, j4 = session.aligned_step(state, 0.5, 2.0)
+        if session.pose[1] <= 0:
+            print('  joint 2 is out of travel at {:.1f} mm; the path cannot go '
+                  'lower'.format(state['height'] if state['height'] else float('nan')))
+            break
         j2 = max(0, session.pose[1] - 3)
         j3 = min(180, session.pose[2] + 2)
         delta = (j1 - session.pose[0], j2 - session.pose[1],
@@ -466,6 +610,10 @@ def creep(session, state):
             return state
         state = fresh
         print(row(step, session.pose, state))
+        if state['height'] is not None and state['height'] <= session.stop_height_mm:
+            print('  reached {:.1f} mm, the height this object needs'.format(
+                session.stop_height_mm))
+            break
         if state['range_mm'] and state['range_mm'] <= table_plane.CAM_TO_GRIPPER_MM:
             print('  target reached the gripper distance')
             break
@@ -562,8 +710,8 @@ def main():
     try:
         if not session.streams.wait():
             raise RuntimeError('No camera frames. Is the camera driver running?')
-        print('mode: {}   detector: {}   descent steps: {}   settle x{:.2f}\n'.format(
-            'EXECUTE' if args.execute else 'DRY-RUN', args.detector,
+        print('mode: {}   detector: {}   colour: {}   steps: {}   settle x{:.2f}\n'.format(
+            'EXECUTE' if args.execute else 'DRY-RUN', args.detector, args.colour,
             args.descent_steps, args.settle))
         session.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS,
                      arm_control.HOMING_TIME_MS / 1000.0 + 1.5 if args.execute else 0.1)
@@ -585,7 +733,10 @@ def main():
 
         print('=== lift and verify ===')
         state, held = travel(session, state, LIFT_LADDER, 'the lift')
-        final = session.look()
+        # Gate this one too. Ungated, it once returned a 198017 px region at
+        # (189, 233) after the object had left the frame, which is the dark
+        # monitor rather than a 34 mm biscuit, and reported it as the target.
+        final = session.look(session.last_px)
         offset = None
         if final:
             offset = ((final['cx'] - reach_candy.GRIPPER_PX[0]) ** 2

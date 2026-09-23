@@ -79,13 +79,135 @@ def predict_target(previous_px, joint_delta):
 # Depth intrinsics, for turning a depth pixel into millimetres.
 DEPTH_SCALE = 2.0  # colour is 1280x720, depth 640x360, same field of view.
 
-# Colour is thresholded on the Lab a* channel rather than HSV hue. The wrapper
-# is dark (L about 47), and hue is unstable at low lightness: the sweet's
-# median hue sat three degrees outside a 170-179 red band and only 105 px
-# passed. a* is a direct green-to-red axis and does not care how dark the pixel
-# is. At a* > 140 the sweet gave 938 px with zero false regions, while the
-# whole frame's 99.5th percentile was 138.
+# Colour is thresholded in Lab rather than on HSV hue. The wrapper is dark
+# (L about 47) and hue is unstable at low lightness: the sweet's median hue sat
+# three degrees outside a 170-179 red band and only 105 px passed. Lab's a* and
+# b* are chroma axes and do not care how dark the pixel is. At a* > 140 the
+# sweet gave 938 px with zero false regions, while the whole frame's 99.5th
+# percentile was 138.
 DEFAULT_A_STAR = 140
+
+# Generalised to any colour by treating it as a direction in the a*-b* plane
+# and thresholding the projection onto it. OpenCV's 8-bit Lab puts neutral at
+# 128 on both axes, with a* running green to red and b* blue to yellow, so:
+#
+#     chroma = (a - 128) * dx + (b - 128) * dy
+#
+# Directions taken from the actual Lab chroma of saturated sRGB colours, not
+# guessed. Guessing got blue wrong: pure blue is a* = +79, b* = -108, so it
+# leans towards red on the a* axis rather than sitting at (0, -1).
+#
+# 'red' is the exception and stays on the bare a* axis, because that is what
+# was validated on the sweet and the true red direction would break it. The
+# wrapper's chroma is (13, 0), which projects to 13 on the a* axis but only
+# 10.0 on the true red direction of (0.767, 0.642), below the threshold of 12.
+#
+# The cost of that choice, stated plainly: the a* axis is really a "not green"
+# test, and pure blue projects to +79 on it, so a strongly blue object would
+# also pass --colour red. Nothing in the test scene did, but it is a real
+# weakness. For any object that is not this sweet, prefer sampling its own
+# direction with --colour @x,y.
+COLOUR_DIRECTIONS = {
+    'red': (1.000, 0.000),
+    'red-sat': (0.767, 0.642),
+    'green': (-0.720, 0.694),
+    'blue': (0.590, -0.807),
+    'yellow': (-0.226, 0.974),
+    'orange': (0.442, 0.897),
+    'pink': (0.973, -0.231),
+    'cyan': (-0.960, -0.280),
+    'purple': (0.732, -0.682),
+    'magenta': (0.849, -0.528),
+}
+DEFAULT_CHROMA = DEFAULT_A_STAR - 128     # 12
+
+
+def parse_colour(spec, bgr=None):
+    """Turn a --colour argument into a chroma direction.
+
+    Accepts a name from COLOUR_DIRECTIONS, a literal "dx,dy", or "@x,y" to
+    sample the direction from that pixel of `bgr`. Sampling is the robust
+    option for an object that is not one of the idealised colours, which is
+    most objects: it asks the thing itself what colour it is.
+    """
+    spec = str(spec).strip()
+    if spec.startswith('@'):
+        if bgr is None:
+            raise ValueError('sampling a colour needs a frame')
+        x, y = (int(float(v)) for v in spec[1:].split(','))
+        patch = cv2.cvtColor(bgr[max(0, y - 6):y + 7, max(0, x - 6):x + 7],
+                             cv2.COLOR_BGR2LAB).astype(float)
+        a = float(numpy.median(patch[:, :, 1])) - 128.0
+        b = float(numpy.median(patch[:, :, 2])) - 128.0
+        length = (a * a + b * b) ** 0.5
+        if length < 3.0:
+            raise ValueError(
+                'that pixel is nearly neutral (chroma {:.1f}); pick a more '
+                'colourful part of the object'.format(length))
+        return (a / length, b / length), length
+    if ',' in spec:
+        dx, dy = (float(v) for v in spec.split(','))
+        return (dx, dy), None
+    if spec not in COLOUR_DIRECTIONS:
+        raise ValueError('unknown colour {!r}; known: {}'.format(
+            spec, ', '.join(sorted(COLOUR_DIRECTIONS))))
+    return COLOUR_DIRECTIONS[spec], None
+
+
+def colour_margin(bgr, colour, target_px, threshold=DEFAULT_CHROMA):
+    """How far the target's chroma stands above the rest of the frame.
+
+    Returns (target_projection, frame_99_5_percentile). A margin near zero means
+    the colour choice will not separate the object from its background, which is
+    worth knowing before the arm moves rather than after.
+
+    Measured over the detected blob's own pixels, not a window at its centroid.
+    That distinction matters: on a concave blob, such as the printing wrapped
+    round a biscuit bar, the centroid lands off the object entirely and the
+    window reported a chroma of zero for a blob that had clearly passed the
+    threshold.
+    """
+    mask, projection = chroma_mask(bgr, colour, threshold)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, numpy.ones((5, 5), numpy.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, numpy.ones((9, 9), numpy.uint8))
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if count < 2:
+        return None, float(numpy.percentile(projection, 99.5))
+    best, best_distance = None, None
+    for label in range(1, count):
+        dx = centroids[label][0] - target_px[0]
+        dy = centroids[label][1] - target_px[1]
+        distance = dx * dx + dy * dy
+        if best is None or distance < best_distance:
+            best, best_distance = label, distance
+    inside = projection[labels == best]
+    if inside.size == 0:
+        return None, float(numpy.percentile(projection, 99.5))
+    # The background percentile must exclude the target, or a large target
+    # dominates its own baseline. A blue biscuit filling 15000 px reported a
+    # target chroma of 69 against a "background" of 68, a margin of +1, purely
+    # because the biscuit was most of what the 99.5th percentile was measuring.
+    outside = projection[labels != best]
+    background = float(numpy.percentile(outside, 99.5)) if outside.size else 0.0
+    return float(numpy.percentile(inside, 75)), background
+
+
+def chroma_mask(bgr, colour='red', threshold=DEFAULT_CHROMA):
+    """Pixels whose chroma points far enough towards `colour`.
+
+    `colour` is a name from COLOUR_DIRECTIONS or a (dx, dy) pair in the a*-b*
+    plane. The direction is normalised, so the threshold means the same thing
+    whichever colour is asked for.
+    """
+    direction = COLOUR_DIRECTIONS[colour] if isinstance(colour, str) else colour
+    length = (direction[0] ** 2 + direction[1] ** 2) ** 0.5
+    if length <= 0:
+        raise ValueError('colour direction must be non-zero')
+    dx, dy = direction[0] / length, direction[1] / length
+
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(numpy.int16)
+    projection = (lab[:, :, 1] - 128) * dx + (lab[:, :, 2] - 128) * dy
+    return (projection > threshold).astype(numpy.uint8), projection
 
 
 def parse_args():
@@ -180,8 +302,9 @@ class Streams(object):
         self.depth_topic.unsubscribe()
 
 
-def find_target(bgr, a_star, min_area, previous=None, max_jump=120.0):
-    """Locate the red target. Returns (cx, cy, area, rivals) or None.
+def find_target(bgr, a_star, min_area, previous=None, max_jump=120.0,
+                colour='red'):
+    """Locate the coloured target. Returns (cx, cy, area, rivals) or None.
 
     Picking simply the largest red blob is not enough. Human skin also sits
     high on a*, so a hand in the frame produces rival regions, and on one run a
@@ -192,8 +315,9 @@ def find_target(bgr, a_star, min_area, previous=None, max_jump=120.0):
     teleport. Returning None is the honest answer when nothing qualifies; the
     caller skips the step rather than steering from a bad fix.
     """
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
-    mask = (lab[:, :, 1] > a_star).astype(numpy.uint8)
+    # a_star keeps its name and its meaning for red, where a* > a_star is the
+    # same test as chroma > a_star - 128 along the red direction.
+    mask, _ = chroma_mask(bgr, colour, a_star - 128)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, numpy.ones((5, 5), numpy.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, numpy.ones((9, 9), numpy.uint8))
     count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)

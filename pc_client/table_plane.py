@@ -262,7 +262,7 @@ def in_working_area(colour_px, area=WORKING_AREA, frame=FRAME_PX):
 
 def pick_graspable(objects, max_width_mm=60.0, min_width_mm=8.0,
                    min_top_mm=8.0, centre_px=(640.0, 360.0),
-                   working_area=WORKING_AREA):
+                   working_area=WORKING_AREA, max_long_mm=200.0):
     """Choose the object most likely to be the intended target.
 
     Geometry alone returns everything standing on the table, the keyboard
@@ -271,12 +271,24 @@ def pick_graspable(objects, max_width_mm=60.0, min_width_mm=8.0,
     object measured 61.3 mm and missed by 1.3 mm. So the working area does the
     rest of the work, and nearness to the centre only breaks what is left.
     """
-    candidates = [o for o in objects
-                  if min_width_mm <= o['width_mm'] <= max_width_mm
-                  and min_width_mm <= o['depth_mm'] <= max_width_mm
-                  and o['top_mm'] >= min_top_mm
-                  and (working_area is None
-                       or in_working_area(o['colour_px'], working_area))]
+    # The jaws close across the narrower axis, so that is the dimension that
+    # has to fit. Requiring BOTH axes to fit threw out a 25 x 110 mm biscuit
+    # bar that the jaws could hold perfectly well across its width. The long
+    # axis still gets a generous ceiling, which keeps the keyboard out at
+    # 201 x 188 mm.
+    candidates = []
+    for o in objects:
+        narrow = min(o['width_mm'], o['depth_mm'])
+        wide = max(o['width_mm'], o['depth_mm'])
+        if not min_width_mm <= narrow <= max_width_mm:
+            continue
+        if wide > max_long_mm:
+            continue
+        if o['top_mm'] < min_top_mm:
+            continue
+        if working_area is not None and not in_working_area(o['colour_px'], working_area):
+            continue
+        candidates.append(o)
     if not candidates:
         return None
     return min(candidates, key=lambda o: (
@@ -295,3 +307,23 @@ def preflight_offset(colour_px, objects):
         (o['colour_px'][0] - colour_px[0]) ** 2 + (o['colour_px'][1] - colour_px[1]) ** 2))
     return (colour_px[0] - nearest['colour_px'][0],
             colour_px[1] - nearest['colour_px'][1]), nearest
+
+
+def grip_width_mm(obj):
+    """Width the jaws have to span, in mm.
+
+    The jaws close across the narrower horizontal axis, so that is the starting
+    point; using the wider one would ask for an aperture wider than the jaws
+    open for anything long, such as a 33 x 83 mm biscuit bar.
+
+    But the narrow axis systematically UNDERESTIMATES a rounded object. The
+    object mask is everything more than 6 mm above the table, which on a sphere
+    captures only the upper cap, narrower than the widest section. The sweet
+    measured 21 mm across that way while standing 27 mm tall, and gripping it
+    as 21 mm asks for a 15 mm aperture, about what flattened one earlier at 180.
+    For an object resting on a table, its height is an independent estimate of
+    its diameter, so the larger of the two is taken. That reproduces the
+    aperture that was proven to hold the sweet without marking it.
+    """
+    narrow = min(obj['width_mm'], obj['depth_mm'])
+    return max(narrow, obj['top_mm'])

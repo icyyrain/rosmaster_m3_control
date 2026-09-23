@@ -482,7 +482,33 @@ FK 下降路径的求解范围；检测器一致性用的是**独立的**颜色�
 只是把航点数从常量改成参数（默认值就是原来的 20），所有 settle 乘一个默认 1.0 的系数
 ——时序完全一致。唯一的行为变化是 **preflight 会先跑，并且可以拒绝启动**。
 
-### 13. 机械臂命令
+### 13. 指定颜色
+
+`--colour` 现在是参数。颜色被表示成 Lab a\*-b\* 平面上的一个方向, 阈值是在该方向上的
+投影, 所以同一个数字对所有颜色含义一致。
+
+```powershell
+python .\pc_client\pick_and_place.py --execute --colour red-sat --detector table --auto-width
+python .\pc_client\pick_and_place.py --execute --colour blue --detector table --auto-width
+python .\pc_client\pick_and_place.py --execute --colour @610,470
+```
+
+三种写法: 名字 (`red` `red-sat` `blue` `green` `yellow` `orange` `pink` `cyan` `purple`
+`magenta`)、字面方向 `dx,dy`、或 `@x,y` **从物体上采样**。采样最稳健, 因为多数真实物体
+都不是理想色。不加 `--colour` 时默认 `red`, 即原来的糖果任务, 行为不变。
+
+**注意 `red` 和 `red-sat` 的区别。** `red` 是裸 a\* 轴, 这是当初在那颗暗色糖上验证过
+的方向; 换成"正确"的红方向会让它失效 (糖的色度是 (13,0), 投影到真红方向只有 10.0,
+低于阈值 12)。代价是 a\* 轴其实是个"非绿"检测: 桌上放了蓝饼干后, 它抓的是**饼干上的
+橙黄印刷** (7697 px) 而不是糖 (814 px)。`red-sat` 是真实红方向, 在那个场景里以 +15 的
+裕度正确选中糖, 而 `red` 只有 +2。
+
+**平物体抓不起来。** 15.9 mm 高的饼干条尝试两次都失败: creep 把关节 2 走到行程下限 0,
+夹爪在它上方约 20 mm 处闭合。FK 下降路径的终点是按 28 mm 高的糖解的, 对平物体太高。
+preflight 会给出警告 (28 mm 抓成功过, 15.9 mm 失败两次)。要抓更平的物体需要按目标重解
+FK 目标, 也就是运行时携带正运动学 -- 这个工具没有。
+
+### 14. 机械臂命令
 
 原厂命令格式如下，执行后机械臂会真实运动：
 

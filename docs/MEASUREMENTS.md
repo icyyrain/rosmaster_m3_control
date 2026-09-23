@@ -796,6 +796,96 @@ the image further, so the tracker has more to predict and the plane fit sees
 more motion blur. Below about 0.5x settling the arm is still moving when it is
 measured.
 
+## Colour as a parameter, and five bugs it exposed
+
+`--colour` takes a name, a literal Lab direction, or `@x,y` to sample the
+colour off the object. A colour becomes a direction in the Lab a*-b* plane and
+the threshold is the projection onto it, so one number means the same thing
+whichever colour is asked for.
+
+### Getting the directions right
+
+The first set was guessed and wrong. Pure blue is a* = +79, b* = -108, so it
+leans towards red on the a* axis rather than sitting at (0, -1), and a
+best-of-eight-directions test mismatched five of the eight colours. Taking the
+directions from the actual Lab chroma of saturated sRGB fixed all eight.
+
+`red` is kept on the bare a* axis because that is what was validated on the
+sweet, and the true red direction would break it: the wrapper's chroma is
+(13, 0), which projects to 13 on the a* axis but only 10.0 on (0.767, 0.642),
+under the threshold of 12. The cost is that the a* axis is really a "not green"
+test, and with a biscuit bar on the table it grabbed the bar's orange printing
+instead of the sweet, 7697 px against the sweet's 814. `red-sat` is the true
+direction and, on that scene, picked the sweet with a margin of +15 where plain
+`red` had +2.
+
+Measured on one frame with both objects present:
+
+| colour | target | area | chroma | background | margin |
+| --- | --- | --- | --- | --- | --- |
+| red | (630, 504) | 10504 | 29 | 9 | +20, the biscuit print |
+| red-sat | (793, 477) | 774 | 21 | 6 | +15, the sweet |
+| blue | (629, 499) | 15307 | 69 | 19 | +50, the biscuit |
+| sampled @610,470 | (629, 499) | 15554 | - | - | the biscuit |
+
+### Five things this broke, all now fixed
+
+**The margin was measured at the centroid.** On a concave blob, such as
+printing wrapped round a bar, the centroid lands off the object: it reported a
+chroma of 0 for a blob that had clearly passed the threshold. Now measured over
+the blob's own pixels.
+
+**The background baseline included the target.** A blue biscuit filling
+15000 px gave a target chroma of 69 against a "background" of 68, a margin of
++1, because the biscuit was most of what the 99.5th percentile measured.
+Excluding the chosen blob turns that into +50.
+
+**Both jaw axes had to fit.** That rejected a 33 x 83 mm bar the jaws can hold
+across its width. The jaws close on the narrower axis, so that is the dimension
+that must fit, with a generous ceiling on the long axis that still keeps the
+keyboard out at 201 x 188 mm.
+
+**Preflight and the tracker disagreed about which object they meant.**
+Preflight chose by geometry alone, so with both objects present it measured the
+biscuit at 16 mm while `--colour red-sat` tracked the 28 mm sweet, and the stop
+height and `--auto-width` were set from the wrong one. Both now share one
+selection path: colour first, then size and position.
+
+**`--auto-width` asked for a crushing grip.** The object mask is everything
+more than 6 mm above the table, which on a sphere captures only the upper cap,
+so the narrow axis underestimates: the sweet measured 21 mm across while
+standing 27 mm tall, and gripping it as 21 mm asks for a 15.3 mm aperture,
+about what flattened one at 180. An object resting on a table has its height as
+an independent estimate of its diameter, so the larger of the two is used. That
+gives joint6 163 and a 22.3 mm aperture, the grip proven to hold the sweet
+unmarked.
+
+### The biscuit still cannot be picked up, and why
+
+Two attempts failed the same way: the creep ran joint 2 down to its 0 travel
+limit and the jaws closed roughly 20 mm above a 15.9 mm bar. Making the stop
+height follow the object, at its top plus 8 mm, did not help. The FK descent
+path `GOAL_J2, GOAL_J3 = 18, 62` was solved for a 28 mm object at 265 mm and
+its endpoint is simply too high for a flat one. Reaching flatter objects needs
+the goal re-solved per target, which means carrying forward kinematics at run
+time.
+
+A check built on this got it wrong first, and that is worth recording. It
+claimed a "reachable floor" of 38 mm, taken from the lowest gripper height any
+descent ever reported, and then refused the sweet that had already been picked
+up twice. The error: depth stops returning anything below about 120 mm of
+range, so the height reading disappears while the arm is still descending.
+38 mm was where measurement stopped, not where motion stopped. The check is now
+an honest non-fatal warning carrying the two data points it actually has:
+28 mm grasped, 15.9 mm failed twice.
+
+### Where it stands
+
+| object | preflight | run |
+| --- | --- | --- |
+| 28 mm sweet, `--colour red-sat --auto-width` | all clear | held and replaced, target moving 1 px per lift step against 108, 81 and 175 expected |
+| 15.9 mm biscuit bar, `--colour blue --auto-width` | two warnings | jaws close above it |
+
 ## What this means for reinforcement learning
 
 Usable today, without touching the firmware, for **visual servoing**: the
