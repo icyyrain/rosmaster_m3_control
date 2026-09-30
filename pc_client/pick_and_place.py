@@ -1141,9 +1141,13 @@ def travel(session, state, ladder, label):
     return state, held
 
 
-def place(session, state, ladder=LIFT_LADDER):
+def place(session, state, grasp_pose, ladder=LIFT_LADDER):
     print('=== lower and release ===')
-    state, still_held = travel(session, state, list(reversed(ladder)), 'the descent')
+    descent = list(reversed(ladder))
+    grasp_rung = (grasp_pose[1], grasp_pose[2])
+    if descent[-1] != grasp_rung:
+        descent.append(grasp_rung)
+    state, still_held = travel(session, state, descent, 'the descent')
     pose = list(session.pose)
     pose[5] = gripper_state.OPEN_CMD
     session.send(pose, 1200, 2.5)
@@ -1213,6 +1217,7 @@ def main():
             print('home. final pose {}'.format(session.pose))
             return 1
         state = grip(session, state)
+        grasp_pose = list(session.pose)
         grasp_px = ((state['cx'], state['cy']) if state is not None else None)
         elongated = (session.object_aspect is not None
                      and session.object_aspect >= ELONGATED_ASPECT)
@@ -1242,21 +1247,39 @@ def main():
         # centre even while correctly held. For it, invariance relative to the
         # closed-jaw frame is the meaningful test. Round/full-view objects keep
         # the old absolute gripper-pixel gate.
-        if elongated:
+        if elongated and final is None:
+            # The complete presentation-height lift intentionally carries a
+            # long package out of the eye-in-hand camera's field of view. That
+            # is inconclusive, not proof that the jaws are empty. Returning
+            # along the known lift path is safer than opening at HOME.
+            verdict = None
+        elif elongated:
             verdict = held and drift is not None and drift < HELD_PIXEL_DRIFT_PX
         else:
             verdict = held and offset is not None and offset < 150
-        print('  VERDICT: {}'.format('HELD' if verdict else 'not held'))
+        if verdict is None:
+            print('  VERDICT: inconclusive (elongated target left the frame)')
+        else:
+            print('  VERDICT: {}'.format('HELD' if verdict else 'not held'))
 
-        if not verdict:
-            print('\nnot holding anything, so not attempting to place it')
+        released = False
+        if verdict is False:
+            print('\ngrasp not confirmed, so not attempting to place it')
+            print('returning HOME with joint6 unchanged; the jaws will not open')
         elif args.keep_holding:
             print('\n--keep-holding given; leaving the object in the jaws')
             print('The servo holds with stall torque, so do not leave it long.')
         else:
-            place(session, state or final, lift_ladder)
+            if verdict is None:
+                print('\ntarget visibility is inconclusive; returning along the known '
+                      'lift path and releasing only at the table')
+            place(session, state or final, grasp_pose, lift_ladder)
+            released = True
 
-        session.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS,
+        home_pose = list(arm_control.HOME_POSE)
+        if not released:
+            home_pose[5] = session.pose[5]
+        session.send(home_pose, arm_control.HOMING_TIME_MS,
                      arm_control.HOMING_TIME_MS / 1000.0 + 1.0)
         print('\nhome. final pose {}'.format(session.pose))
         return 0
