@@ -118,10 +118,6 @@ WRIST_MAX_MOVE_DEG = 60
 
 # Retracting and lowering both follow this joint 2 / joint 3 ladder.
 LIFT_LADDER = [(33, 53), (54, 40), (90, 20)]
-# The first two rungs held the 16 mm biscuit; the last, much larger shoulder /
-# elbow move shook it loose. A low-profile elongated object only needs enough
-# clearance to verify and replace it, not the full presentation-height lift.
-ELONGATED_LIFT_LADDER = LIFT_LADDER[:2]
 HELD_PIXEL_DRIFT_PX = 60.0
 
 J1_BAND = (70, 110)
@@ -1220,11 +1216,9 @@ def main():
         grasp_px = ((state['cx'], state['cy']) if state is not None else None)
         elongated = (session.object_aspect is not None
                      and session.object_aspect >= ELONGATED_ASPECT)
-        lift_ladder = ELONGATED_LIFT_LADDER if elongated else LIFT_LADDER
+        lift_ladder = LIFT_LADDER
 
         print('=== lift and verify ===')
-        if elongated:
-            print('  elongated low-profile object: using the two-rung gentle lift')
         state, held = travel(session, state, lift_ladder, 'the lift')
         # Gate this one too. Ungated, it once returned a 198017 px region at
         # (189, 233) after the object had left the frame, which is the dark
