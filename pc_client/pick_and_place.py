@@ -118,6 +118,7 @@ WRIST_MAX_MOVE_DEG = 60
 
 # Retracting and lowering both follow this joint 2 / joint 3 ladder.
 LIFT_LADDER = [(33, 53), (54, 40), (90, 20)]
+PLACE_RELEASE_CLEARANCE_MM = 10.0
 HELD_PIXEL_DRIFT_PX = 60.0
 
 J1_BAND = (70, 110)
@@ -1141,13 +1142,43 @@ def travel(session, state, ladder, label):
     return state, held
 
 
+def low_release_pose(grasp_pose, first_lift_rung=LIFT_LADDER[0],
+                     clearance_mm=PLACE_RELEASE_CLEARANCE_MM):
+    """Choose a point on the proven lift path just above the grasp pose."""
+    start_height = kinematics.gripper_height_mm(grasp_pose)
+    target_height = start_height + clearance_mm
+    span = max(abs(first_lift_rung[0] - grasp_pose[1]),
+               abs(first_lift_rung[1] - grasp_pose[2]), 1)
+    best = (abs(clearance_mm), list(grasp_pose), start_height)
+    seen = set()
+    for sample in range(span * 4 + 1):
+        fraction = sample / float(span * 4)
+        pose = list(grasp_pose)
+        pose[1] = int(round(grasp_pose[1]
+                            + fraction * (first_lift_rung[0] - grasp_pose[1])))
+        pose[2] = int(round(grasp_pose[2]
+                            + fraction * (first_lift_rung[1] - grasp_pose[2])))
+        rung = (pose[1], pose[2])
+        if rung in seen:
+            continue
+        seen.add(rung)
+        height = kinematics.gripper_height_mm(pose)
+        score = abs(height - target_height)
+        if score < best[0]:
+            best = (score, pose, height)
+    return best[1], best[2] - start_height
+
+
 def place(session, state, grasp_pose, ladder=LIFT_LADDER):
     print('=== lower and release ===')
     descent = list(reversed(ladder))
-    grasp_rung = (grasp_pose[1], grasp_pose[2])
-    if descent[-1] != grasp_rung:
-        descent.append(grasp_rung)
+    release_pose, release_clearance = low_release_pose(grasp_pose, ladder[0])
+    release_rung = (release_pose[1], release_pose[2])
+    if descent[-1] != release_rung:
+        descent.append(release_rung)
     state, still_held = travel(session, state, descent, 'the descent')
+    print('  low release point {}: about {:.1f} mm above the grasp height'.format(
+        release_rung, release_clearance))
     pose = list(session.pose)
     pose[5] = gripper_state.OPEN_CMD
     session.send(pose, 1200, 2.5)
@@ -1247,14 +1278,14 @@ def main():
         # centre even while correctly held. For it, invariance relative to the
         # closed-jaw frame is the meaningful test. Round/full-view objects keep
         # the old absolute gripper-pixel gate.
-        if elongated and final is None:
+        if elongated:
             # The complete presentation-height lift intentionally carries a
-            # long package out of the eye-in-hand camera's field of view. That
-            # is inconclusive, not proof that the jaws are empty. Returning
-            # along the known lift path is safer than opening at HOME.
+            # long package out of the eye-in-hand camera's useful field of
+            # view. A tiny visible corner is no more conclusive than no blob:
+            # centroid drift while clipping makes both tests unreliable.
+            # Returning along the known lift path is safer than opening at
+            # HOME.
             verdict = None
-        elif elongated:
-            verdict = held and drift is not None and drift < HELD_PIXEL_DRIFT_PX
         else:
             verdict = held and offset is not None and offset < 150
         if verdict is None:
