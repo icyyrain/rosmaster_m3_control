@@ -61,6 +61,11 @@ cd C:\Projects\rosmaster_m3_control_red_rl
 `steps.jsonl` 有完整转移，`images/` 是命令前后图片。数据和模型目录被 Git 忽略；
 建议另外备份，不要把实验图片误提交到仓库。
 
+已有离线模型时，可以加 `--shadow-model models/red_sweet_bc.npz`。模型只在每步
+计算“如果由我控制会下发什么”，预测值和与规则动作的误差写入同一条记录；真正
+发送给机械臂的始终是规则控制器的动作。这个影子模式不会打开连续 MP4 录像；
+示教数据仍按步保存前后 RGB 图像，普通预检则不保存这些图片。
+
 收集多个成功 episode 后训练并检查留出轨迹误差：
 
 ```powershell

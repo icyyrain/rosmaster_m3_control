@@ -12,7 +12,8 @@ import arm_control
 import gripper_state
 import reach_candy
 import pick_and_place as pick
-from pc_client.red_rl.dataset import EpisodeRecorder
+from pc_client.red_rl.dataset import EpisodeRecorder, features
+from pc_client.red_rl.shadow import ShadowPolicy, episode_report
 
 
 # At high HOME height the integer-degree arm can stop improving around 26 px.
@@ -36,6 +37,7 @@ class TeacherSession(pick.Session):
         self.demo = None
         self.phase = None
         self.last_state = None
+        self.shadow = None
 
     def send(self, pose, duration, settle):
         target = arm_control.clamp_pose(pose)
@@ -43,6 +45,19 @@ class TeacherSession(pick.Session):
             self.demo.before_send(self.last_state, self.pose, target, self.phase,
                                   self, self.streams.colour())
             self.demo.pending['duration_ms'] = duration
+            if self.shadow is not None:
+                try:
+                    observation = features(self.last_state, self.pose, self,
+                                           self.phase)
+                    proposal = self.shadow.action(observation)
+                    teacher = [target[i] - self.pose[i] for i in range(4)]
+                    self.demo.pending['shadow_action_joint_delta_deg'] = proposal
+                    self.demo.pending['shadow_abs_error_deg'] = [
+                        abs(proposal[i] - teacher[i]) for i in range(4)]
+                except Exception as error:
+                    # Shadow evaluation must never veto or replace a teacher
+                    # command after the physical sequence has started.
+                    self.demo.pending['shadow_error'] = str(error)
         super().send(target, duration, settle)
 
     def look(self, predicted=None):
@@ -63,6 +78,9 @@ def arguments():
     parser.add_argument('--execute', action='store_true',
                         help='Actually move the arm; otherwise only run camera preflight.')
     parser.add_argument('--no-orient-gripper', action='store_true')
+    parser.add_argument('--shadow-model', metavar='PATH',
+                        help='Evaluate this model alongside teacher actions; '
+                             'model output is NEVER sent to the arm.')
     cli = parser.parse_args()
     return SimpleNamespace(
         host=cli.host, port=cli.port, detector='table', colour='red-sat',
@@ -73,6 +91,7 @@ def arguments():
         skip_preflight=False, grasp_offset_mm=None, squeeze_mm=5.0,
         keep_holding=False, record=None, execute=cli.execute,
         dataset=cli.dataset,
+        shadow_model=cli.shadow_model,
     )
 
 
@@ -126,6 +145,7 @@ def short_lift_and_release(session, grasp_pose, state):
 
 def main():
     args = arguments()
+    shadow = ShadowPolicy(args.shadow_model) if args.shadow_model else None
     if args.execute:
         print('The REAL arm will return HOME, approach the red sweet, close, '
               'lift, and release near the table.')
@@ -133,6 +153,7 @@ def main():
         if not arm_control.confirm_execute():
             raise SystemExit('Cancelled.')
     session = TeacherSession(args)
+    session.shadow = shadow
     demo = None
     outcome = 'interrupted'
     human_success = None
@@ -157,6 +178,9 @@ def main():
             'object_width_mm': session.width_mm,
             'stop_height_mm': session.stop_height_mm,
             'pose_is_commanded_not_measured': True,
+            'shadow_model': str(shadow.path) if shadow is not None else None,
+            'shadow_training_episodes': (
+                shadow.training_episodes if shadow is not None else None),
         })
         session.demo = demo
         print('Recording episode at {}'.format(demo.path))
@@ -197,6 +221,8 @@ def main():
                 demo.after_look(None, session.pose, session, None)
             demo.finish(outcome, human_success)
             print('Saved {} approach steps to {}'.format(demo.count, demo.path))
+            if shadow is not None:
+                print('Read-only shadow report: {}'.format(episode_report(demo.path)))
         session.close()
 
 
