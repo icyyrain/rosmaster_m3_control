@@ -1,5 +1,8 @@
 # ROSMASTER M3 Pro 接入与控制工程
 
+> 红色糖果学习实验在独立分支 `codex/red-sweet-rl`，从已验证的抓取版本派生。
+> 数据采集、离线模仿学习及当前限制见 [docs/RED_SWEET_RL.md](docs/RED_SWEET_RL.md)。
+
 这份 README 同时作为新会话的交接说明。当前目标是让 Windows 电脑上的程序通过
 ROS 2/rosbridge 与 ROSMASTER M3 Pro 交互，最终用于“读取真实机械臂状态 → 强化
 学习算法计算动作 → 安全地下发动作”的闭环控制。

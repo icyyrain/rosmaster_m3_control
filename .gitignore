@@ -21,3 +21,5 @@ vendor/
 
 # Camera recordings can be hundreds of megabytes.
 recordings/
+datasets/
+models/
