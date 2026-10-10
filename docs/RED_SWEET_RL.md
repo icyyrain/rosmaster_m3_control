@@ -61,6 +61,7 @@ cd C:\Projects\rosmaster_m3_control_red_rl
 收集多个成功 episode 后训练并检查留出轨迹误差：
 
 ```powershell
+& C:\Projects\rosmaster_m3_control\.venv\Scripts\python.exe -m pc_client.red_rl.validate_dataset
 & C:\Projects\rosmaster_m3_control\.venv\Scripts\python.exe -m pc_client.red_rl.train_bc
 & C:\Projects\rosmaster_m3_control\.venv\Scripts\python.exe -m unittest tests.test_red_rl_dataset -v
 ```

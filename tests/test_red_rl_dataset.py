@@ -8,6 +8,7 @@ import numpy as np
 
 from pc_client.red_rl.dataset import EpisodeRecorder, FEATURE_NAMES, features, load_examples
 from pc_client.red_rl.train_bc import fit, predict
+from pc_client.red_rl.validate_dataset import validate_episode
 
 
 class DatasetTests(unittest.TestCase):
@@ -48,6 +49,8 @@ class DatasetTests(unittest.TestCase):
             self.assertTrue(meta['human_success'])
             self.assertEqual(rows[0]['action_joint_delta_deg'], [1, 0, 0, 2])
             self.assertTrue((good.path / rows[0]['image']).exists())
+            self.assertEqual(validate_episode(good.path), [])
+            self.assertEqual(validate_episode(bad.path), [])
 
     def test_ridge_baseline_recovers_simple_teacher(self):
         rng = np.random.default_rng(11)
