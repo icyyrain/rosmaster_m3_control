@@ -43,6 +43,42 @@ ping -S 192.168.2.10 192.168.2.4
 
 在独立工作树中运行（使用主工作树已有的 Windows venv）：
 
+### 自助连续采集（推荐）
+
+先在 `C:\Projects\rosmaster_m3_control` 运行 `car-mode.cmd`，确认小车开机、网线插好。
+然后双击 `C:\Projects\rosmaster_m3_control_red_rl\collect-red-sweet.cmd`；默认最多采 5 次，
+也可在 PowerShell 中指定次数：
+
+```powershell
+cd C:\Projects\rosmaster_m3_control_red_rl
+.\collect-red-sweet.cmd --count 5
+```
+
+脚本会要求输入一次小车 SSH 密码（目前为 `yahboom`），验证已知 SSH 主机密钥，
+仅在缺少时启动 rosbridge/Orbbec 相机，退出时只关闭由本次会话启动的服务。
+每次先确认机械臂在 HOME、摆好红糖果、清理周围障碍，按 Enter 预检；通过后仍须输入 `MOVE` 才会动臂。
+短抬升后看实物，输入 `y`（夹住）、`n`（没夹住）或 `u`（看不清），程序随后
+低位松开并回 HOME。下一次需要再次摆放并按 Enter；输入 `q` 可提前结束。
+任何一次正式执行异常都会停止整个会话，不会自动继续，需先确认机械臂位置。
+运行时不要碰手柄；随时准备按小车电源键。脚本不会自动切换回公司网络。
+
+默认**不开持续录像**；只为每条真实示教保存动作前后 JPEG 和结构化数据。
+目前实测每条约占 4–6 MB，20 条大约需要 100 MB；定期备份 `datasets/red_sweet/`。
+先以 20 条左右人工确认成功、覆盖约 5–10 个不同安全位置为初步目标，
+每个位置采 2–3 次，位置尽量覆盖预检可达区域而非扎堆。自然发生的失败也如实标注，
+不要为了凑失败数据故意让机械臂碰撞。这个数量仅够第一轮离线评估，不保证
+学习策略可上机；若要直接从图像训练策略或做在线强化学习，通常还需更多数据。
+每批结束运行 `validate_dataset`，先查看成功率与留出整条轨迹的误差，再决定是否续采。
+
+可选 `--shadow-model models/red_sweet_bc.npz` 让旧模型只读旁观；不传时仅采规则示教。
+如果只想试一条，用 `--count 1`。运行失败若提示缺 `paramiko`，在本工作树目录运行：
+
+```powershell
+& C:\Projects\rosmaster_m3_control\.venv\Scripts\python.exe -m pip install -r pc_client/requirements.txt
+```
+
+### 单次手动采集
+
 ```powershell
 cd C:\Projects\rosmaster_m3_control_red_rl
 & C:\Projects\rosmaster_m3_control\.venv\Scripts\python.exe -m pc_client.red_rl.collect --fast

@@ -3,3 +3,6 @@ roslibpy>=1.7,<2
 # Needed by camera_view.py and teleop_view.py to decode and display frames.
 opencv-python>=4.8,<6
 numpy>=1.24,<3
+
+# The operator-guided red-sweet collector starts/stops ROS services over SSH.
+paramiko>=3,<6
