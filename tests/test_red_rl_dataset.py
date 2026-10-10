@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ import numpy as np
 from pc_client.red_rl.dataset import EpisodeRecorder, FEATURE_NAMES, features, load_examples
 from pc_client.red_rl.train_bc import fit, predict
 from pc_client.red_rl.validate_dataset import validate_episode
+from pc_client.red_rl.collect import align_teacher, pick, TEACHER_ALIGN_TOLERANCE_PX
 
 
 class DatasetTests(unittest.TestCase):
@@ -60,6 +62,13 @@ class DatasetTests(unittest.TestCase):
         weights, mean, scale = fit(x, y, ridge=0.001)
         estimated = predict(x, weights, mean, scale)
         self.assertLess(np.abs(estimated - y).mean(), 0.001)
+
+    def test_teacher_tolerance_is_local_to_alignment(self):
+        original = pick.ALIGN_TOLERANCE_PX
+        with patch.object(pick, 'align', side_effect=lambda _:
+                          pick.ALIGN_TOLERANCE_PX):
+            self.assertEqual(align_teacher(None), TEACHER_ALIGN_TOLERANCE_PX)
+        self.assertEqual(pick.ALIGN_TOLERANCE_PX, original)
 
 
 if __name__ == '__main__':

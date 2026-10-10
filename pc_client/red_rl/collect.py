@@ -15,6 +15,21 @@ import pick_and_place as pick
 from pc_client.red_rl.dataset import EpisodeRecorder
 
 
+# At high HOME height the integer-degree arm can stop improving around 26 px.
+# The descent controller continues to re-centre on every waypoint. Keeping
+# this local avoids changing the proven standalone pick script.
+TEACHER_ALIGN_TOLERANCE_PX = 30.0
+
+
+def align_teacher(session):
+    original = pick.ALIGN_TOLERANCE_PX
+    try:
+        pick.ALIGN_TOLERANCE_PX = TEACHER_ALIGN_TOLERANCE_PX
+        return pick.align(session)
+    finally:
+        pick.ALIGN_TOLERANCE_PX = original
+
+
 class TeacherSession(pick.Session):
     def __init__(self, args):
         super().__init__(args)
@@ -146,9 +161,13 @@ def main():
         session.demo = demo
         print('Recording episode at {}'.format(demo.path))
         session.phase = 'align'
-        state = pick.align(session)
+        state = align_teacher(session)
         if state is None:
             outcome = 'align_failed'
+            session.phase = None
+            print('High-level alignment failed; returning HOME with jaws open.')
+            session.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS,
+                         arm_control.HOMING_TIME_MS / 1000.0 + 1.0)
             return 1
         session.phase = None
         state = pick.orient_gripper(session, state)
