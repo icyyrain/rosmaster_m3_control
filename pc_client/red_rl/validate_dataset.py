@@ -22,6 +22,22 @@ def validate_episode(folder):
         problems.append('feature schema differs from the current recorder')
     if meta.get('task') != 'red_sweet_approach':
         problems.append('not a red-sweet approach episode')
+    if 'auto_evidence' in meta and meta['auto_evidence'] is not None:
+        evidence = meta['auto_evidence']
+        if not isinstance(evidence, dict) or evidence.get('method') != 'short_lift_motion_v1':
+            problems.append('invalid automatic lift evidence')
+        elif meta.get('auto_success') is not evidence.get('success'):
+            problems.append('automatic verdict differs from saved evidence')
+        else:
+            for key in ('image_before', 'image_after'):
+                image = evidence.get(key)
+                if image is None:
+                    continue
+                path = (folder / image).resolve()
+                if folder.resolve() not in path.parents or not path.is_file():
+                    problems.append('automatic evidence {} unavailable'.format(key))
+                elif cv2.imread(str(path)) is None:
+                    problems.append('automatic evidence {} cannot be decoded'.format(key))
     rows = [json.loads(line) for line in steps_path.read_text(
         encoding='utf-8').splitlines() if line.strip()]
     if len(rows) != meta.get('steps'):

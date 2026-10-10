@@ -94,10 +94,13 @@ class EpisodeRecorder:
         self.log.flush()
         self.pending = None
 
-    def finish(self, outcome, human_success=None, notes=None):
+    def finish(self, outcome, human_success=None, notes=None,
+               auto_success=None, auto_evidence=None):
         if self.pending is not None:
             raise RuntimeError('Last action has no following observation')
         self.metadata.update(outcome=outcome, human_success=human_success,
+                             auto_success=auto_success,
+                             auto_evidence=auto_evidence,
                              notes=notes, steps=self.count, finished_s=time.time())
         (self.path / 'episode.json').write_text(
             json.dumps(self.metadata, indent=2, ensure_ascii=False) + '\n',

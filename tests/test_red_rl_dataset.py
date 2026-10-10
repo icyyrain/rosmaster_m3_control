@@ -46,7 +46,9 @@ class DatasetTests(unittest.TestCase):
                             'align', self.session, frame)
             bad.after_look(self.state, [91, 120, 0, 2, 90, 90],
                            self.session, frame)
-            bad.finish('completed', False)
+            bad.finish('completed', False, auto_success=True,
+                       auto_evidence={'method': 'short_lift_motion_v1',
+                                      'success': True})
             self.assertEqual(len(load_examples(folder)), 1)
             self.assertEqual(len(load_examples(folder, success_only=False)), 2)
             meta, rows = load_examples(folder)[0]

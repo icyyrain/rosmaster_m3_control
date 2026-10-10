@@ -20,6 +20,7 @@ import paramiko
 
 import arm_control
 import reach_candy
+from pc_client.red_rl.auto_reward import compare_labels
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -252,6 +253,11 @@ def main():
                 break
             completed += 1
         print('\nSession finished: {} new completed trial(s).'.format(completed))
+        comparison = compare_labels(dataset)
+        print('Auto-vs-human labels so far: {} agree, {} disagree, {} auto '
+              'inconclusive ({} human-labeled new-format episodes).'.format(
+                  comparison['agree'], comparison['disagree'],
+                  comparison['auto_abstained'], comparison['human_labeled']))
         print('Validate with: python -m pc_client.red_rl.validate_dataset')
         return 0
     finally:

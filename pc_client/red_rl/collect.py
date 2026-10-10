@@ -13,6 +13,7 @@ import gripper_state
 import reach_candy
 import pick_and_place as pick
 from pc_client.red_rl.dataset import EpisodeRecorder, features
+from pc_client.red_rl.auto_reward import assess_short_lift
 from pc_client.red_rl.shadow import ShadowPolicy, episode_report
 
 
@@ -110,7 +111,16 @@ def ask_success():
             return None
 
 
-def short_lift_and_release(session, grasp_pose, state):
+def _audit_image(session, demo, name):
+    """Best-effort still frame; failure must not strand an arm holding an object."""
+    try:
+        return demo._image(session.streams.colour(), name)
+    except (OSError, ValueError) as error:
+        print('  audit snapshot unavailable: {}'.format(error))
+        return None
+
+
+def short_lift_and_release(session, grasp_pose, state, demo):
     """Fixed post-policy routine; never part of the learned action target."""
     lift, actual_rise = pick.low_release_pose(grasp_pose, clearance_mm=35.0)
     if actual_rise < 20.0 or actual_rise > 50.0:
@@ -119,6 +129,7 @@ def short_lift_and_release(session, grasp_pose, state):
     print('=== fixed short lift ===')
     print('  lift {:.1f} mm to {}'.format(actual_rise, lift[:4]))
     previous = session.last_px
+    before_image = _audit_image(session, demo, 'grasp-closed.jpg')
     delta = tuple(lift[i] - session.pose[i] for i in range(4))
     predicted = (reach_candy.predict_target(previous, delta)
                  if previous is not None else None)
@@ -129,7 +140,19 @@ def short_lift_and_release(session, grasp_pose, state):
     else:
         print('  camera target {:.0f},{:.0f}, area {}'.format(
             fresh['cx'], fresh['cy'], fresh['area']))
+    after_image = _audit_image(session, demo, 'short-lift.jpg')
+    after_px = (fresh['cx'], fresh['cy']) if fresh is not None else None
+    auto_evidence = assess_short_lift(previous, after_px, predicted, actual_rise)
+    auto_evidence['image_before'] = before_image
+    auto_evidence['image_after'] = after_image
     human_success = ask_success()
+    auto_label = {True: 'HELD', False: 'NOT HELD', None: 'INCONCLUSIVE'}[
+        auto_evidence['success']]
+    print('  automatic camera suggestion: {} ({})'.format(
+        auto_label, auto_evidence['reason']))
+    if human_success is not None and auto_evidence['success'] is not None:
+        print('  comparison with your label: {}'.format(
+            'agrees' if human_success == auto_evidence['success'] else 'DISAGREES'))
 
     print('=== fixed low release ===')
     release, clearance = pick.low_release_pose(grasp_pose, clearance_mm=10.0)
@@ -140,7 +163,7 @@ def short_lift_and_release(session, grasp_pose, state):
     session.send(opened, 1200, 2.5)
     session.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS,
                  arm_control.HOMING_TIME_MS / 1000.0 + 1.0)
-    return human_success
+    return human_success, auto_evidence
 
 
 def main():
@@ -157,6 +180,7 @@ def main():
     demo = None
     outcome = 'interrupted'
     human_success = None
+    auto_evidence = None
     try:
         if not session.streams.wait():
             raise RuntimeError('No camera frames; check the camera/rosbridge nodes')
@@ -211,7 +235,8 @@ def main():
         session.phase = None
         state = pick.grip(session, state)
         grasp_pose = list(session.pose)
-        human_success = short_lift_and_release(session, grasp_pose, state)
+        human_success, auto_evidence = short_lift_and_release(
+            session, grasp_pose, state, demo)
         outcome = 'completed'
         return 0
     finally:
@@ -219,7 +244,10 @@ def main():
             session.phase = None
             if demo.pending is not None:
                 demo.after_look(None, session.pose, session, None)
-            demo.finish(outcome, human_success)
+            demo.finish(outcome, human_success,
+                        auto_success=(auto_evidence['success']
+                                      if auto_evidence is not None else None),
+                        auto_evidence=auto_evidence)
             print('Saved {} approach steps to {}'.format(demo.count, demo.path))
             if shadow is not None:
                 print('Read-only shadow report: {}'.format(episode_report(demo.path)))

@@ -59,6 +59,11 @@ cd C:\Projects\rosmaster_m3_control_red_rl
 每次先确认机械臂在 HOME、摆好红糖果、清理周围障碍，按 Enter 预检；通过后仍须输入 `MOVE` 才会动臂。
 短抬升后看实物，输入 `y`（夹住）、`n`（没夹住）或 `u`（看不清），程序随后
 低位松开并回 HOME。下一次需要再次摆放并按 Enter；输入 `q` 可提前结束。
+程序会从短抬升前后的目标像素运动给出自动建议：目标跟着夹爪保持在相机中近似
+原位，建议“夹住”；按桌面静止目标的预测方向移动，建议“没夹住”；视觉丢失、
+两种解释分不开或预测位移太小时给“不确定”。**自动建议在人工回答后才显示**，
+不影响操作者判断；`episode.json` 同时保存 `auto_success`、判断依据和两张审计照片。
+当前训练仍只信任 `human_success`，不会拿未经验证的自动建议代替标签。
 任何一次正式执行异常都会停止整个会话，不会自动继续，需先确认机械臂位置。
 运行时不要碰手柄；随时准备按小车电源键。脚本不会自动切换回公司网络。
 
@@ -76,6 +81,18 @@ cd C:\Projects\rosmaster_m3_control_red_rl
 ```powershell
 & C:\Projects\rosmaster_m3_control\.venv\Scripts\python.exe -m pip install -r pc_client/requirements.txt
 ```
+
+每批采集后比较自动与人工标签：
+
+```powershell
+& C:\Projects\rosmaster_m3_control\.venv\Scripts\python.exe -m pc_client.red_rl.auto_reward
+```
+
+旧 episode 没有短抬升前后照片/判断依据，不会被当作自动判断样本。后续在线强化
+学习确实需要自动终局奖励；先检查不同位置、照明、摆放下的假成功率与拒判率。
+只有自动判断足够可信时，才把高置信度判断用作终局奖励；“不确定”应交给人工
+核验或不给奖励更新，不能悄悄当失败。若假成功仍多，需要独立视角相机或夹爪
+传感器等额外证据。抓取过程中的每步动作不必人工打标签。
 
 ### 单次手动采集
 
