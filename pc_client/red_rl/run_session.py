@@ -117,6 +117,25 @@ def wait_for_camera(streams, timeout=8):
     return False
 
 
+def home_arm(client):
+    """Establish the collector's commanded HOME before the first preflight."""
+    print('\nStartup homing: move the arm to the collector HOME {}.'.format(
+        arm_control.HOME_POSE))
+    print('This is an open-loop move from the arm\'s current pose. Clear its full '
+          'swept area before confirming.')
+    if not arm_control.confirm_execute():
+        print('Startup homing cancelled; no collection will run.')
+        return False
+    link = arm_control.ArmLink(client, True)
+    try:
+        link.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS)
+        time.sleep(arm_control.HOMING_TIME_MS / 1000.0 + 1.0)
+    finally:
+        link.close()
+    print('HOME target sent and motion time elapsed (joint position is not measured).')
+    return True
+
+
 def connect_ssh(host, username, password):
     known_hosts = Path.home() / '.ssh' / 'known_hosts'
     if not known_hosts.is_file():
@@ -240,6 +259,8 @@ def main():
                     camera.tail()))
         else:
             print('Reusing existing camera.')
+        if not home_arm(client):
+            return 0
         streams.close()
         streams = None
         client.terminate()

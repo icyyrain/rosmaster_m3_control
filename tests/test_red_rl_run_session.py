@@ -8,6 +8,26 @@ from pc_client.red_rl import run_session
 
 
 class RunSessionTests(unittest.TestCase):
+    def test_startup_home_sends_one_target_after_confirmation(self):
+        client = object()
+        with mock.patch.object(run_session.arm_control, 'confirm_execute', return_value=True), \
+                mock.patch.object(run_session.arm_control, 'ArmLink') as link_class, \
+                mock.patch.object(run_session.time, 'sleep') as sleep:
+            self.assertTrue(run_session.home_arm(client))
+        link_class.assert_called_once_with(client, True)
+        link_class.return_value.send.assert_called_once_with(
+            list(run_session.arm_control.HOME_POSE),
+            run_session.arm_control.HOMING_TIME_MS)
+        link_class.return_value.close.assert_called_once_with()
+        sleep.assert_called_once_with(
+            run_session.arm_control.HOMING_TIME_MS / 1000.0 + 1.0)
+
+    def test_declined_startup_home_does_not_advertise_or_move(self):
+        with mock.patch.object(run_session.arm_control, 'confirm_execute', return_value=False), \
+                mock.patch.object(run_session.arm_control, 'ArmLink') as link_class:
+            self.assertFalse(run_session.home_arm(object()))
+        link_class.assert_not_called()
+
     def test_failed_dry_run_never_starts_real_trial(self):
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.object(run_session.subprocess, 'run', return_value=mock.Mock(returncode=1)) as run:
