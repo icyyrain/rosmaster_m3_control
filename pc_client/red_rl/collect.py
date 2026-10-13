@@ -42,6 +42,10 @@ class TeacherSession(pick.Session):
 
     def send(self, pose, duration, settle):
         target = arm_control.clamp_pose(pose)
+        if target[4] != arm_control.HOME_POSE[4]:
+            raise RuntimeError('Red-sweet collector refuses wrist rotation: '
+                               'joint5 {} instead of {}'.format(
+                                   target[4], arm_control.HOME_POSE[4]))
         if self.demo is not None and self.phase is not None:
             self.demo.before_send(self.last_state, self.pose, target, self.phase,
                                   self, self.streams.colour())
@@ -78,7 +82,6 @@ def arguments():
                         help='Use the same 10-waypoint fast descent as the rule script.')
     parser.add_argument('--execute', action='store_true',
                         help='Actually move the arm; otherwise only run camera preflight.')
-    parser.add_argument('--no-orient-gripper', action='store_true')
     parser.add_argument('--shadow-model', metavar='PATH',
                         help='Evaluate this model alongside teacher actions; '
                              'model output is NEVER sent to the arm.')
@@ -88,7 +91,7 @@ def arguments():
         a_star=140, min_area=150, width_mm=28.0, auto_width=True,
         descent_steps=10 if cli.fast else 20,
         settle=0.6 if cli.fast else 1.0, fast=cli.fast,
-        creep_controller='auto', no_orient_gripper=cli.no_orient_gripper,
+        creep_controller='auto', no_orient_gripper=True,
         skip_preflight=False, grasp_offset_mm=None, squeeze_mm=5.0,
         keep_holding=False, record=None, execute=cli.execute,
         dataset=cli.dataset,
@@ -192,11 +195,17 @@ def main():
         if not args.execute:
             print('Dry run passed. Add --execute to collect a demonstration.')
             return 0
-        session.lock_clipped_target = (
-            session.object_aspect is not None
-            and session.object_aspect >= pick.ELONGATED_ASPECT)
+        # This collector is RED SWEET ONLY. The generic pick script's
+        # elongated-target wrist rotation and clipped-centre compensation
+        # were introduced for the blue biscuit. Wrapping folds can make the
+        # sweet's depth mask exceed the 1.8:1 threshold and accidentally turn
+        # both features on. Keep the proven sweet grip geometry instead.
+        session.lock_clipped_target = False
+        print('Red-sweet grip profile: fixed joint5, no elongated-target '
+              'centre compensation.')
         demo = EpisodeRecorder(args.dataset, {
             'source': 'pick_and_place rule teacher', 'task': 'red_sweet_approach',
+            'grasp_profile': 'red_fixed_wrist_no_clipped_compensation',
             'host': args.host, 'fast': args.fast,
             'object_top_mm': session.object_top_mm,
             'object_width_mm': session.width_mm,
@@ -218,10 +227,6 @@ def main():
                          arm_control.HOMING_TIME_MS / 1000.0 + 1.0)
             return 1
         session.phase = None
-        state = pick.orient_gripper(session, state)
-        if state is None:
-            outcome = 'wrist_orientation_failed'
-            return 1
         session.phase = 'descend'
         state = pick.descend(session, state)
         if state is None:

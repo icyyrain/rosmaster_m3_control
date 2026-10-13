@@ -10,7 +10,7 @@ import numpy as np
 from pc_client.red_rl.dataset import EpisodeRecorder, FEATURE_NAMES, features, load_examples
 from pc_client.red_rl.train_bc import fit, predict
 from pc_client.red_rl.validate_dataset import validate_episode
-from pc_client.red_rl.collect import align_teacher, pick, TEACHER_ALIGN_TOLERANCE_PX
+from pc_client.red_rl.collect import align_teacher, arguments, pick, TEACHER_ALIGN_TOLERANCE_PX
 from pc_client.red_rl.collect import TeacherSession
 from pc_client.red_rl.shadow import ShadowPolicy, episode_report
 
@@ -73,6 +73,13 @@ class DatasetTests(unittest.TestCase):
                           pick.ALIGN_TOLERANCE_PX):
             self.assertEqual(align_teacher(None), TEACHER_ALIGN_TOLERANCE_PX)
         self.assertEqual(pick.ALIGN_TOLERANCE_PX, original)
+
+    def test_red_collector_defaults_to_fixed_wrist_and_rejects_rotation(self):
+        with patch('sys.argv', ['collect']):
+            self.assertTrue(arguments().no_orient_gripper)
+        unconnected = TeacherSession.__new__(TeacherSession)
+        with self.assertRaisesRegex(RuntimeError, 'refuses wrist rotation'):
+            unconnected.send([90, 120, 0, 0, 111, 90], 500, 0)
 
     def test_shadow_prediction_cannot_replace_teacher_command(self):
         class FakeDemo:
