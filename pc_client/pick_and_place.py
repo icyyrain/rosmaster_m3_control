@@ -396,6 +396,12 @@ class Session(object):
             if found is not None:
                 self.acquired = True
         else:
+            # After depth acquisition, the first colour-only look has no
+            # motion-model prediction yet. Anchor it to the acquired target;
+            # otherwise an unrelated red blob elsewhere in the frame can win.
+            if (self.args.detector == 'table' and predicted is None
+                    and self.acquired and self.last_px is not None):
+                predicted = self.last_px
             found = self._look_red(predicted)
         if found is None:
             return None

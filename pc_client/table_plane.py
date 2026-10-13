@@ -209,8 +209,10 @@ def find_objects(depth, rng, min_height=OBJECT_MIN_HEIGHT_MM,
 
     heights = numpy.full(depth.shape, numpy.nan, numpy.float32)
     heights[valid] = points[valid] @ normal + offset
-    if numpy.nanmedian(heights[valid]) < 0:
-        heights = -heights
+    # fit_plane already orients the normal toward the camera, so points above
+    # the table have positive height. The table's median residual can drift a
+    # fraction of a millimetre below zero; using its sign to flip all heights
+    # intermittently turns real objects into negative-height holes.
 
     mask = ((heights > min_height) & (heights < max_height)).astype(numpy.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, numpy.ones((3, 3), numpy.uint8))
