@@ -248,10 +248,11 @@ def parse_args():
 class Streams(object):
     """Latest colour and depth frame over one rosbridge connection."""
 
-    def __init__(self, client):
+    def __init__(self, client, colour_sink=None):
         self._colour = None
         self._depth = None
         self.n_colour = 0
+        self.colour_sink = colour_sink
         self.colour_topic = roslibpy.Topic(
             client, COLOR_TOPIC, 'sensor_msgs/msg/CompressedImage',
             throttle_rate=100, queue_length=1, queue_size=1)
@@ -264,6 +265,8 @@ class Streams(object):
     def _on_colour(self, message):
         self._colour = message['data']
         self.n_colour += 1
+        if self.colour_sink is not None:
+            self.colour_sink(self._colour)
 
     def _on_depth(self, message):
         self._depth = message

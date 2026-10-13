@@ -19,3 +19,5 @@ Thumbs.db
 backups/remote/
 vendor/
 
+# Camera recordings can be hundreds of megabytes.
+recordings/
