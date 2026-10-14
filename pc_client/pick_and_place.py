@@ -84,24 +84,26 @@ CREEP_STEPS = 5
 ADAPTIVE_CREEP_STEPS = 12
 ADAPTIVE_MAX_JOINT_STEP = 1
 ALIGN_RETRIES = 2
-LOW_PROFILE_HEIGHT_MM = 26.0
 ACQUIRE_ATTEMPTS = 10
 MODEL_BIAS_LIMIT_MM = 25.0
 ELONGATED_ASPECT = 1.8
 CLIPPED_OFFSET_SMOOTHING = 0.5
 
-# Where the gripper origin should end up, relative to the top of the object.
-# The legacy 8 mm offset held a 28 mm sweet. A 16 mm biscuit needed the guarded
-# 18 mm floor, effectively a 2 mm offset; 8 mm still left its jaws too high.
-# Keep the two empirical regimes separate so the proven sweet path is unchanged.
-GRASP_OFFSET_MM = 8.0
-LOW_PROFILE_GRASP_OFFSET_MM = 2.0
+# Where the gripper origin should end up: the object's mid-height plus this.
+# The finger pads sit roughly this far below the origin, so this aims them at
+# the object's waist. Two regimes used to live here, "top + 2 mm" below a 26 mm
+# switch and "top + 8 mm" above it, and the red sweet measures 24.7-28.8 mm, so
+# each run picked one at random on a millimetre of depth noise. Across 35
+# labelled sweet grasps (calibrated FK at closing, minus measured top) the jaws
+# held 9 of 11 times at 1.2 mm or more *below* the top, 4 of 17 within -1 to
+# +3.3 mm and 1 of 7 at 4.6 mm or more above. One rule covers both objects: a
+# 16 mm biscuit gives 18 mm, which held it, and a 27 mm sweet 23.5 mm.
+GRIP_DEPTH_MM = 10.0
 HEIGHT_FLOOR_MM = 18.0          # absolute floor, whatever the object
 
-# Empirical lower bound. A 16 mm biscuit was picked up after the adaptive FK
-# controller was added. Lower objects remain untested and should still warn.
-PROVEN_GRASP_HEIGHT_MM = 28.0
-LOW_PROFILE_PROVEN_HEIGHT_MM = 16.0
+# Empirical lower bound: a 16 mm biscuit is the flattest object held so far.
+# Lower objects remain untested and should still warn.
+PROVEN_LOWEST_OBJECT_MM = 16.0
 ALIGN_TOLERANCE_PX = 25.0
 GATE_PX = 170.0
 CLIPPED_OFFSET_SAFETY_PX = GATE_PX * 0.85
@@ -272,22 +274,22 @@ def parse_args():
                              'monitoring quality.')
     parser.add_argument('--creep-controller', choices=('auto', 'legacy', 'adaptive'),
                         default='auto',
-                        help='Final descent controller. auto preserves the proven '
-                             'legacy path for tall objects and uses online-calibrated '
-                             'forward kinematics below {:.0f} mm.'.format(
-                                 LOW_PROFILE_HEIGHT_MM))
+                        help='Final descent controller. adaptive steps to the '
+                             'grasp height with online-calibrated forward '
+                             'kinematics. legacy is the original fixed ladder; its '
+                             'stop test rarely fires because depth fails at that '
+                             'range. auto uses adaptive whenever preflight measured '
+                             'the object, and legacy otherwise.')
     parser.add_argument('--no-orient-gripper', action='store_true',
                         help='Do not rotate joint 5 to follow the long axis of '
                              'an elongated target. Round targets never rotate it.')
     parser.add_argument('--skip-preflight', action='store_true',
                         help='Run anyway when a preflight check fails.')
     parser.add_argument('--grasp-offset-mm', type=float,
-                        help='Where to stop the gripper origin above the top of '
-                             'the object. By default use {:.0f} mm for objects '
-                             'below {:.0f} mm and {:.0f} mm otherwise. Raise '
-                             'it if the jaws hit the table.'.format(
-                                 LOW_PROFILE_GRASP_OFFSET_MM,
-                                 LOW_PROFILE_HEIGHT_MM, GRASP_OFFSET_MM))
+                        help='Where to stop the gripper origin relative to the '
+                             'top of the object; negative is below the top. By '
+                             'default aim at mid-height + {:.0f} mm. Raise it if '
+                             'the jaws hit the table.'.format(GRIP_DEPTH_MM))
     parser.add_argument('--squeeze-mm', type=float, default=5.0,
                         help='How much narrower than the object to close. The '
                              'force knob; 5 mm held a sweet without marking it.')
@@ -346,9 +348,7 @@ class Session(object):
         self.object_top_mm = top_mm
         self.grasp_offset_mm = self.args.grasp_offset_mm
         if self.grasp_offset_mm is None:
-            self.grasp_offset_mm = (LOW_PROFILE_GRASP_OFFSET_MM
-                                    if top_mm < LOW_PROFILE_HEIGHT_MM
-                                    else GRASP_OFFSET_MM)
+            self.grasp_offset_mm = GRIP_DEPTH_MM - top_mm / 2.0
         self.stop_height_mm = max(HEIGHT_FLOOR_MM,
                                   top_mm + self.grasp_offset_mm)
 
@@ -699,11 +699,10 @@ def preflight(session):
             session.object_aspect = wide / max(narrow, 1e-6)
             top = graspable['top_mm']
             check('grasp height calibrated',
-                  top >= LOW_PROFILE_PROVEN_HEIGHT_MM - 1.0,
-                  '{:.1f} mm; {:.0f} mm succeeded with the legacy path and '
-                  '{:.0f} mm succeeded with adaptive FK'.format(
-                      top, PROVEN_GRASP_HEIGHT_MM,
-                      LOW_PROFILE_PROVEN_HEIGHT_MM),
+                  top >= PROVEN_LOWEST_OBJECT_MM - 1.0,
+                  '{:.1f} mm tall, grasp at {:.1f} mm; objects of {:.0f} to '
+                  '29 mm have been held'.format(
+                      top, session.stop_height_mm, PROVEN_LOWEST_OBJECT_MM),
                   fatal=False)
 
             # Two independent measurements of the same object that ought to
@@ -993,7 +992,7 @@ def _recentre_adaptive(session, state):
 
 
 def creep_adaptive(session, state):
-    """Approach a low object using FK calibrated by the live table plane.
+    """Approach the grasp height using FK calibrated by the live table plane.
 
     The URDF gets the *change* in gripper height right, but its absolute table
     offset moved by 7-9 mm between real runs.  Calibrating that offset at the
@@ -1069,11 +1068,11 @@ def creep_adaptive(session, state):
 def creep(session, state):
     controller = session.args.creep_controller
     if controller == 'auto':
-        controller = ('adaptive'
-                      if (session.object_top_mm is not None
-                          and session.object_top_mm < LOW_PROFILE_HEIGHT_MM)
-                      else 'legacy')
-    print('creep controller: {}'.format(controller))
+        # Without a measured top there is no grasp height to aim for, only the
+        # floor, so fall back to the original ladder.
+        controller = 'adaptive' if session.object_top_mm is not None else 'legacy'
+    print('creep controller: {}, aiming for {:.1f} mm'.format(
+        controller, session.stop_height_mm))
     if controller == 'legacy':
         return creep_legacy(session, state)
     return creep_adaptive(session, state)
