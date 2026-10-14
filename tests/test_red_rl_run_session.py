@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -8,6 +9,10 @@ from pc_client.red_rl import run_session
 
 
 class RunSessionTests(unittest.TestCase):
+    def test_zero_grasp_offset_reaches_session_parser(self):
+        with mock.patch.object(sys, 'argv', ['run_session', '--grasp-offset-mm', '0']):
+            self.assertEqual(run_session.arguments().grasp_offset_mm, 0.0)
+
     def test_startup_home_sends_one_target_after_confirmation(self):
         client = object()
         with mock.patch.object(run_session.arm_control, 'confirm_execute', return_value=True), \
@@ -35,6 +40,23 @@ class RunSessionTests(unittest.TestCase):
                     self.assertFalse(run_session.collect_one(Path(directory), None))
             self.assertEqual(run.call_count, 1)
             self.assertNotIn('--execute', run.call_args.args[0])
+
+    def test_experiment_flags_reach_dry_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(run_session.subprocess, 'run',
+                                   return_value=mock.Mock(returncode=1)) as run:
+                with mock.patch('builtins.input', return_value='q'):
+                    run_session.collect_one(Path(directory), None,
+                                            ['--centre-compensation',
+                                             '--grasp-offset-mm', '5.0',
+                                             '--pregrasp-base-mm', '8.0',
+                                             '--pregrasp-down-mm', '2.0'])
+            command = run.call_args.args[0]
+            self.assertIn('--centre-compensation', command)
+            self.assertIn('--grasp-offset-mm', command)
+            self.assertIn('--pregrasp-base-mm', command)
+            self.assertIn('--pregrasp-down-mm', command)
+            self.assertNotIn('--execute', command)
 
     def test_failed_real_trial_stops_instead_of_continuing(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -170,9 +170,10 @@ def newest_episode(dataset, previous):
     return next(iter(created))
 
 
-def collect_one(dataset, shadow_model):
+def collect_one(dataset, shadow_model, experiment_args=()):
     base = [sys.executable, '-m', 'pc_client.red_rl.collect', '--fast',
             '--dataset', str(dataset)]
+    base += list(experiment_args)
     if shadow_model:
         base += ['--shadow-model', str(shadow_model)]
     while True:
@@ -209,9 +210,33 @@ def arguments():
     parser.add_argument('--dataset', type=Path, default=Path('datasets/red_sweet'))
     parser.add_argument('--shadow-model', type=Path,
                         help='Optional read-only model; NEVER controls the arm.')
+    parser.add_argument('--centre-compensation', action='store_true',
+                        help='Experimental red-sweet clipped-centre compensation; '
+                             'wrist rotation remains disabled.')
+    parser.add_argument('--grasp-offset-mm', type=float,
+                        help='Experimental gripper height relative to measured object top '
+                             '(0-10 mm).')
+    parser.add_argument('--creep-controller', choices=('auto', 'legacy', 'adaptive'),
+                        default='auto', help='Experimental final-approach controller.')
+    parser.add_argument('--pregrasp-retract-j4-deg', type=int, choices=(0, 1, 2),
+                        default=0, help='Small baseward correction before closing.')
+    parser.add_argument('--pregrasp-base-mm', type=float, default=0.0,
+                        help='Experimental baseward shift before closing (0-10 mm).')
+    parser.add_argument('--pregrasp-down-mm', type=float, default=0.0,
+                        help='Experimental downward shift before closing (0-2.3 mm).')
     args = parser.parse_args()
     if args.count < 1:
         parser.error('--count must be at least 1')
+    if args.grasp_offset_mm is not None and not 0.0 <= args.grasp_offset_mm <= 10.0:
+        parser.error('--grasp-offset-mm must be between 0 and 10')
+    if not 0.0 <= args.pregrasp_base_mm <= 10.0:
+        parser.error('--pregrasp-base-mm must be between 0 and 10')
+    if not 0.0 <= args.pregrasp_down_mm <= 2.3:
+        parser.error('--pregrasp-down-mm must be between 0 and 2.3')
+    if bool(args.pregrasp_base_mm) != bool(args.pregrasp_down_mm):
+        parser.error('set both --pregrasp-base-mm and --pregrasp-down-mm')
+    if args.pregrasp_retract_j4_deg and args.pregrasp_base_mm:
+        parser.error('choose either the joint4 correction or the base/down correction')
     return args
 
 
@@ -226,6 +251,19 @@ def main():
             raise RuntimeError('Shadow model does not exist: {}'.format(model))
     else:
         model = None
+    experiment_args = []
+    if args.centre_compensation:
+        experiment_args.append('--centre-compensation')
+    if args.grasp_offset_mm is not None:
+        experiment_args += ['--grasp-offset-mm', str(args.grasp_offset_mm)]
+    if args.creep_controller != 'auto':
+        experiment_args += ['--creep-controller', args.creep_controller]
+    if args.pregrasp_retract_j4_deg:
+        experiment_args += ['--pregrasp-retract-j4-deg',
+                            str(args.pregrasp_retract_j4_deg)]
+    if args.pregrasp_base_mm:
+        experiment_args += ['--pregrasp-base-mm', str(args.pregrasp_base_mm),
+                            '--pregrasp-down-mm', str(args.pregrasp_down_mm)]
 
     print('Rule-teacher data collection only; no model will control the arm.')
     print('No continuous video recording. Each real trial saves per-step images.')
@@ -270,7 +308,7 @@ def main():
         for number in range(1, args.count + 1):
             if not prompt_placement(number, args.count):
                 break
-            if not collect_one(dataset, model):
+            if not collect_one(dataset, model, experiment_args):
                 break
             completed += 1
         print('\nSession finished: {} new completed trial(s).'.format(completed))
