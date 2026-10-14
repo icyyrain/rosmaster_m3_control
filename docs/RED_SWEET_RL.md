@@ -1,8 +1,35 @@
 # 红色糖果：视觉示教与学习实验（第一阶段）
 
 分支：`codex/red-sweet-rl`。独立工作树：`C:\Projects\rosmaster_m3_control_red_rl`。
-此分支从 `experiment/blue-biscuit-grasp` 的 `90c8934` 创建；没有改小车代码，
-也没有改变原来的 `pc_client/pick_and_place.py` 控制逻辑。
+此分支从 `experiment/blue-biscuit-grasp` 的 `90c8934` 创建，2026-10-14 rebase 到
+`main`；没有改小车代码，本分支也没有改 `pc_client/pick_and_place.py` 的控制逻辑。
+
+## 新旧抓取规则的数据要分开（2026-10-14）
+
+rebase 后，规则示教器的抓取高度来自 `main` 的新规则：夹爪停在**物体中间高度 + 10 mm**，
+红糖约在糖顶下方 3.5 mm。之前的规则以 26 mm 为界：低于 26 mm 停在"顶 + 2 mm"，
+否则停在"顶 + 8 mm"。红糖测得 24.7–28.8 mm，每次随机落进其中一套。所以新旧数据的
+**最后接近（creep）是两个不同老师**，对齐和下降两段的代码没有变。
+
+- 每条 episode 的 `grasp_rule` 字段记录规则：`mid_height_v1`（新）或
+  `top_switch_26mm`（旧）。没有这个字段的 episode 一律视为旧规则；
+  2026-10-14 18:02 之后由采集脚本自动写入。
+- `validate_dataset` 末尾按规则和设置分别统计成功率，**从不合并计算**。设置分为
+  `default`、`wrist_free`（关节 5 固定之前，手腕可能转动）和 `experiment`
+  （抓取偏移、闭爪前位移或指定 creep 控制器等实验参数）。
+- `train_bc` 默认 `--creep-from current`：对齐和下降两段用所有规则的数据，creep 段
+  只用新规则的数据；`--creep-from all` 才会混入旧规则的 creep 段。
+- 加载旧规则数据时，输入特征 `stop_height` 按新规则用 `object_top_mm` 重算
+  （`dataset.current_stop_height_mm`，直接调用 `pick_and_place` 自己的规则），
+  否则同一颗糖在新旧数据里分别是 35 mm 和 23.5 mm，模型可能被它带偏。磁盘上的
+  原始数据不会被改写。
+
+首批新规则示教：2026-10-14 圆球糖 3/3 夹住（人工确认），起点覆盖画面中间、偏左、偏右。
+旧规则：`default` 8/14，`wrist_free` 4/9，`experiment` 2/12。
+
+注意：`--pregrasp-base-mm/--pregrasp-down-mm` 的保护要求闭爪前不低于"糖顶 − 3 mm"，
+新规则默认就停在糖顶下方约 3.5 mm，所以这个实验在新规则下总会被拒绝（回 HOME、
+不闭爪）。`--grasp-offset-mm` 只接受 0–10 mm。需要时再放宽。
 
 ## 研究方案摘要（2026-10-14）
 

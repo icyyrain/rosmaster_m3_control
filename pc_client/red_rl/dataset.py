@@ -4,14 +4,25 @@ import json
 import time
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
 
+import pick_and_place
 import reach_candy
 
 
 PHASES = ('align', 'descend', 'creep')
+
+# Which grasp-height rule the rule teacher used. Before 2026-10-14 the final
+# approach stopped at top + 2 mm below a 26 mm switch and top + 8 mm above it;
+# since then it stops at mid-height + 10 mm. Episodes recorded before the field
+# existed are all legacy. Only the creep phase depends on the rule: align and
+# descend run the same code under both, so their steps can be pooled.
+LEGACY_GRASP_RULE = 'top_switch_26mm'
+CURRENT_GRASP_RULE = 'mid_height_v1'
+RULE_INDEPENDENT_PHASES = ('align', 'descend')
 FEATURE_NAMES = (
     'target_dx', 'target_dy', 'target_range', 'gripper_height',
     'height_valid', 'target_visible',
@@ -19,6 +30,22 @@ FEATURE_NAMES = (
     'object_top', 'stop_height', 'target_area', 'object_aspect',
     'phase_align', 'phase_descend', 'phase_creep',
 )
+_STOP_HEIGHT = FEATURE_NAMES.index('stop_height')
+
+
+def grasp_rule(meta):
+    return meta.get('grasp_rule', LEGACY_GRASP_RULE)
+
+
+def current_stop_height_mm(object_top_mm):
+    """Where today's pick_and_place would stop for an object this tall.
+
+    Asks pick_and_place itself rather than restating its formula, so a later
+    rule change cannot silently disagree with this conversion.
+    """
+    probe = SimpleNamespace(args=SimpleNamespace(grasp_offset_mm=None))
+    pick_and_place.Session.set_object_top(probe, object_top_mm)
+    return probe.stop_height_mm
 
 
 def features(state, pose, session, phase):
@@ -108,11 +135,37 @@ class EpisodeRecorder:
         self.log.close()
 
 
-def load_examples(root, success_only=True):
+def _harmonise_stop_height(step, meta):
+    """Rewrite a legacy episode's stop-height feature in today's rule.
+
+    The policy sees the stop height as an input. Left alone, the same sweet
+    reads 35 mm in a legacy episode and 23.5 mm in a current one, which is a
+    difference in the teacher, not in the scene.
+    """
+    top = meta.get('object_top_mm')
+    if top is None:
+        return step
+    value = current_stop_height_mm(top) / 100.0
+    step = dict(step)
+    for key in ('observation', 'next_observation'):
+        vector = list(step[key])
+        vector[_STOP_HEIGHT] = value
+        step[key] = vector
+    return step
+
+
+def load_examples(root, success_only=True, creep_rule=CURRENT_GRASP_RULE,
+                  harmonise=True):
     """Load valid transitions, grouped by episode for honest splits.
 
     Failed/unknown episodes remain on disk for future RL analysis but must not
     teach the imitation policy that an unsuccessful grasp is the goal.
+
+    Align and descend steps come from every grasp rule. Creep steps come only
+    from `creep_rule` (None keeps every rule), because the old and new rules
+    stop the final approach about 6 mm apart and mixing them would teach the
+    average of two teachers. With `harmonise`, legacy episodes have their
+    stop-height feature restated in the current rule.
     """
     episodes = []
     for meta_path in sorted(Path(root).glob('*/episode.json')):
@@ -122,6 +175,7 @@ def load_examples(root, success_only=True):
         if success_only and not (meta.get('outcome') == 'completed'
                                  and meta.get('human_success') is True):
             continue
+        rule = grasp_rule(meta)
         rows = []
         for line in (meta_path.parent / 'steps.jsonl').read_text(
                 encoding='utf-8').splitlines():
@@ -130,6 +184,11 @@ def load_examples(root, success_only=True):
                 continue
             if not step.get('next_target_visible'):
                 continue
+            if (creep_rule is not None and rule != creep_rule
+                    and step['phase'] not in RULE_INDEPENDENT_PHASES):
+                continue
+            if harmonise and rule != CURRENT_GRASP_RULE:
+                step = _harmonise_stop_height(step, meta)
             rows.append(step)
         if rows:
             episodes.append((meta, rows))

@@ -135,7 +135,8 @@ class CollectArgumentsTests(unittest.TestCase):
               mock.patch.object(collect, 'align_teacher', return_value=state),
               mock.patch.object(collect.pick, 'descend', return_value=state),
               mock.patch.object(collect.pick, 'creep', return_value=state),
-              mock.patch.object(collect, 'EpisodeRecorder', return_value=demo),
+              mock.patch.object(collect, 'EpisodeRecorder',
+                                return_value=demo) as recorder,
               mock.patch.object(collect, 'offset_pregrasp', side_effect=
                                 collect.NoGuardedPregraspMove('No guarded')),
               mock.patch.object(collect.pick, 'grip') as grip):
@@ -145,6 +146,8 @@ class CollectArgumentsTests(unittest.TestCase):
         grip.assert_not_called()
         self.assertEqual(demo.finish.call_args.args[0],
                          'pregrasp_offset_unreachable')
+        self.assertEqual(recorder.call_args.args[1]['grasp_rule'],
+                         collect.CURRENT_GRASP_RULE)
 
 
 if __name__ == '__main__':

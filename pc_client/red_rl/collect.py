@@ -14,7 +14,7 @@ import gripper_state
 import kinematics
 import reach_candy
 import pick_and_place as pick
-from pc_client.red_rl.dataset import EpisodeRecorder, features
+from pc_client.red_rl.dataset import CURRENT_GRASP_RULE, EpisodeRecorder, features
 from pc_client.red_rl.auto_reward import assess_short_lift
 from pc_client.red_rl.shadow import ShadowPolicy, episode_report
 
@@ -359,6 +359,7 @@ def main():
               'compensation {}.'.format('on' if args.centre_compensation else 'off'))
         demo = EpisodeRecorder(args.dataset, {
             'source': 'pick_and_place rule teacher', 'task': 'red_sweet_approach',
+            'grasp_rule': CURRENT_GRASP_RULE,
             'grasp_profile': ('red_fixed_wrist_clipped_compensation'
                               if session.lock_clipped_target else
                               'red_fixed_wrist_no_clipped_compensation'),

@@ -10,7 +10,8 @@ from pathlib import Path
 
 import numpy as np
 
-from pc_client.red_rl.dataset import FEATURE_NAMES, load_examples
+from pc_client.red_rl.dataset import (CURRENT_GRASP_RULE, FEATURE_NAMES,
+                                      grasp_rule, load_examples)
 
 
 def arrays(episodes):
@@ -52,12 +53,27 @@ def main():
     parser.add_argument('--dataset', default='datasets/red_sweet')
     parser.add_argument('--output', default='models/red_sweet_bc.npz')
     parser.add_argument('--ridge', type=float, default=1.0)
+    parser.add_argument('--creep-from', choices=('current', 'all'), default='current',
+                        help='current: creep steps only from the current grasp '
+                             'rule ({}); align/descend always use every rule. '
+                             'all: also pool legacy creep steps.'.format(
+                                 CURRENT_GRASP_RULE))
     args = parser.parse_args()
     if args.ridge <= 0:
         parser.error('--ridge must be positive')
-    episodes = load_examples(args.dataset)
+    episodes = load_examples(
+        args.dataset,
+        creep_rule=CURRENT_GRASP_RULE if args.creep_from == 'current' else None)
     if not episodes:
         parser.error('No complete episodes with visible before/after targets')
+    composition = {}
+    for meta, rows in episodes:
+        for row in rows:
+            key = (grasp_rule(meta), row['phase'])
+            composition[key] = composition.get(key, 0) + 1
+    print('training data (human-confirmed successes, steps by rule and phase):')
+    for (rule, phase), count in sorted(composition.items()):
+        print('  {:<16} {:<8} {}'.format(rule, phase, count))
     rng = np.random.default_rng(20261010)
     order = rng.permutation(len(episodes))
     split = max(1, int(round(0.8 * len(episodes))))
@@ -83,6 +99,7 @@ def main():
              feature_names=np.asarray(FEATURE_NAMES),
              train_mae=np.asarray(train_mae),
              validation_mae=np.asarray(validation_mae or []),
+             creep_from=np.asarray(args.creep_from),
              training_episodes=np.asarray([m['episode'] for m, _ in train]),
              validation_episodes=np.asarray([m['episode'] for m, _ in validation]))
     print('Saved {}'.format(output))
