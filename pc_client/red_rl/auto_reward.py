@@ -79,7 +79,8 @@ def assess_short_lift(before_px, after_px, stationary_px, rise_mm):
 def compare_labels(dataset):
     """Counts only completed episodes with both a human label and new evidence."""
     counts = {'human_labeled': 0, 'agree': 0, 'disagree': 0,
-              'auto_abstained': 0, 'human_unknown': 0, 'without_auto': 0}
+              'auto_abstained': 0, 'human_unknown': 0, 'without_auto': 0,
+              'auto_only': 0}
     for path in sorted(Path(dataset).glob('*/episode.json')):
         meta = json.loads(path.read_text(encoding='utf-8'))
         if meta.get('outcome') != 'completed':
@@ -89,7 +90,10 @@ def compare_labels(dataset):
             continue
         human = meta.get('human_success')
         automatic = meta.get('auto_success')
-        if human is None:
+        if human is None and meta.get('label_source') == 'auto_short_lift':
+            # Unattended episodes carry no person's label to compare with.
+            counts['auto_only'] += 1
+        elif human is None:
             counts['human_unknown'] += 1
         else:
             counts['human_labeled'] += 1
@@ -112,7 +116,9 @@ def main():
         counts['agree'], counts['disagree'], counts['auto_abstained']))
     print('Human unknown: {}; old episodes without auto evidence: {}'.format(
         counts['human_unknown'], counts['without_auto']))
-    print('Human labels remain the training source; this is not an automatic reward.')
+    print('Unattended episodes labelled by the camera alone: {}'.format(
+        counts['auto_only']))
+    print('A human label, where present, always overrides the camera verdict.')
 
 
 if __name__ == '__main__':

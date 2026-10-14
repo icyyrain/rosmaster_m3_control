@@ -23,6 +23,13 @@ PHASES = ('align', 'descend', 'creep')
 LEGACY_GRASP_RULE = 'top_switch_26mm'
 CURRENT_GRASP_RULE = 'mid_height_v1'
 RULE_INDEPENDENT_PHASES = ('align', 'descend')
+
+# Who decided whether the sweet was held. Episodes without the field were
+# labelled by a person. Unattended collection records the camera's short-lift
+# verdict: of 35 grasps labelled both ways it never contradicted a person, but
+# it abstained on 18, mostly misses, which then stay unlabelled.
+HUMAN_LABEL_SOURCE = 'human'
+AUTO_LABEL_SOURCE = 'auto_short_lift'
 FEATURE_NAMES = (
     'target_dx', 'target_dy', 'target_range', 'gripper_height',
     'height_valid', 'target_visible',
@@ -35,6 +42,19 @@ _STOP_HEIGHT = FEATURE_NAMES.index('stop_height')
 
 def grasp_rule(meta):
     return meta.get('grasp_rule', LEGACY_GRASP_RULE)
+
+
+def label_source(meta):
+    return meta.get('label_source', HUMAN_LABEL_SOURCE)
+
+
+def episode_success(meta):
+    """True/False/None. A person's label always wins over the camera's."""
+    if meta.get('human_success') is not None:
+        return meta['human_success']
+    if label_source(meta) == AUTO_LABEL_SOURCE:
+        return meta.get('auto_success')
+    return None
 
 
 def current_stop_height_mm(object_top_mm):
@@ -173,7 +193,7 @@ def load_examples(root, success_only=True, creep_rule=CURRENT_GRASP_RULE,
         if meta.get('format_version') != 1:
             continue
         if success_only and not (meta.get('outcome') == 'completed'
-                                 and meta.get('human_success') is True):
+                                 and episode_success(meta) is True):
             continue
         rule = grasp_rule(meta)
         rows = []

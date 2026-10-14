@@ -3,6 +3,11 @@
 Starts only missing ROS services over SSH, runs the existing rule-teacher
 collector once per operator-approved placement, and stops services it started.
 No student-policy action is ever sent to the robot.
+
+With --auto the operator places the sweet once and confirms once. Each trial
+then labels itself from the camera and puts the sweet down at a random
+reachable spot for the next one. The session stops at the first trial that
+fails preflight, loses the target, does not confirm a hold, or errors.
 """
 
 import argparse
@@ -21,6 +26,7 @@ import paramiko
 import arm_control
 import reach_candy
 from pc_client.red_rl.auto_reward import compare_labels
+from pc_client.red_rl.collect import EXIT_NOT_HELD
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -200,10 +206,54 @@ def collect_one(dataset, shadow_model, experiment_args=()):
     return True
 
 
+def confirm_auto(count):
+    print('\nUNATTENDED collection: up to {} trials without further questions.'.format(count))
+    print('Each held sweet is carried to a random reachable spot and put down; the '
+          'session stops at the first failure.')
+    print('Place the red sweet in reach, clear the table, and stay near the power switch.')
+    return input('Type AUTO to start: ').strip() == 'AUTO'
+
+
+def collect_auto(dataset, experiment_args=()):
+    """One unattended trial. True to carry on, False to stop the session."""
+    previous = set(dataset.glob('*/episode.json'))
+    command = [sys.executable, '-m', 'pc_client.red_rl.collect', '--fast',
+               '--dataset', str(dataset), '--execute', '--auto']
+    command += list(experiment_args)
+    # The collector's own MOVE prompt was answered once, by confirm_auto.
+    result = subprocess.run(command, cwd=ROOT, input='MOVE\n', text=True)
+    episode = newest_episode(dataset, previous)
+    metadata = (json.loads(episode.read_text(encoding='utf-8'))
+                if episode is not None else None)
+    if result.returncode == 0 and metadata is not None:
+        where = metadata.get('relocation')
+        print('Saved {}: HELD (camera), {} approach steps; {}'.format(
+            episode.parent.name, metadata.get('steps'),
+            'put down {moved_mm} mm away at radius {radius_mm} mm, azimuth '
+            '{azimuth_deg} deg'.format(**where) if where else
+            'put back where it was (no checked route to a new spot)'))
+        return True
+    if result.returncode == EXIT_NOT_HELD and metadata is not None:
+        evidence = metadata.get('auto_evidence') or {}
+        print('Stopping: the camera did not confirm a hold ({}). Saved {} as {}.'.format(
+            evidence.get('reason'), episode.parent.name,
+            {False: 'NOT HELD', None: 'unlabelled'}[metadata.get('auto_success')]))
+        return False
+    print('Stopping: trial exited with status {}{}. Inspect the arm before another '
+          'run; it may not be HOME.'.format(
+              result.returncode,
+              '' if episode is None else ' (episode {}, outcome {})'.format(
+                  episode.parent.name, metadata.get('outcome'))))
+    return False
+
+
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--count', type=int, default=5,
                         help='Maximum trials this session; default 5. Quit earlier with q.')
+    parser.add_argument('--auto', action='store_true',
+                        help='Unattended: camera labels, random reachable re-placement, '
+                             'stop at the first failure. Confirm once with AUTO.')
     parser.add_argument('--host', default='192.168.2.4')
     parser.add_argument('--pc-ip', default='192.168.2.10')
     parser.add_argument('--user', default='jetson')
@@ -305,12 +355,24 @@ def main():
         client = None
 
         completed = 0
-        for number in range(1, args.count + 1):
-            if not prompt_placement(number, args.count):
-                break
-            if not collect_one(dataset, model, experiment_args):
-                break
-            completed += 1
+        if args.auto:
+            if model:
+                experiment_args += ['--shadow-model', str(model)]
+            if not confirm_auto(args.count):
+                print('Unattended collection cancelled.')
+                return 0
+            for number in range(1, args.count + 1):
+                print('\n=== unattended trial {}/{} ==='.format(number, args.count))
+                if not collect_auto(dataset, experiment_args):
+                    break
+                completed += 1
+        else:
+            for number in range(1, args.count + 1):
+                if not prompt_placement(number, args.count):
+                    break
+                if not collect_one(dataset, model, experiment_args):
+                    break
+                completed += 1
         print('\nSession finished: {} new completed trial(s).'.format(completed))
         comparison = compare_labels(dataset)
         print('Auto-vs-human labels so far: {} agree, {} disagree, {} auto '

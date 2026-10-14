@@ -71,7 +71,8 @@ def main():
         for row in rows:
             key = (grasp_rule(meta), row['phase'])
             composition[key] = composition.get(key, 0) + 1
-    print('training data (human-confirmed successes, steps by rule and phase):')
+    print('training data (confirmed successes: by a person, or by the camera on '
+          'unattended runs; steps by rule and phase):')
     for (rule, phase), count in sorted(composition.items()):
         print('  {:<16} {:<8} {}'.format(rule, phase, count))
     rng = np.random.default_rng(20261010)

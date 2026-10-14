@@ -7,10 +7,13 @@ from pathlib import Path
 
 import cv2
 
-from pc_client.red_rl.dataset import (CURRENT_GRASP_RULE, FEATURE_NAMES,
-                                      LEGACY_GRASP_RULE, grasp_rule)
+from pc_client.red_rl.dataset import (AUTO_LABEL_SOURCE, CURRENT_GRASP_RULE,
+                                      FEATURE_NAMES, HUMAN_LABEL_SOURCE,
+                                      LEGACY_GRASP_RULE, episode_success,
+                                      grasp_rule, label_source)
 
 KNOWN_GRASP_RULES = (LEGACY_GRASP_RULE, CURRENT_GRASP_RULE)
+KNOWN_LABEL_SOURCES = (HUMAN_LABEL_SOURCE, AUTO_LABEL_SOURCE)
 
 
 def validate_episode(folder):
@@ -27,6 +30,12 @@ def validate_episode(folder):
         problems.append('not a red-sweet approach episode')
     if grasp_rule(meta) not in KNOWN_GRASP_RULES:
         problems.append('unknown grasp rule {!r}'.format(meta.get('grasp_rule')))
+    if label_source(meta) not in KNOWN_LABEL_SOURCES:
+        problems.append('unknown label source {!r}'.format(meta.get('label_source')))
+    elif (label_source(meta) == AUTO_LABEL_SOURCE
+          and meta.get('outcome') == 'completed'
+          and meta.get('auto_evidence') is None):
+        problems.append('camera-labelled episode has no lift evidence')
     if 'auto_evidence' in meta and meta['auto_evidence'] is not None:
         evidence = meta['auto_evidence']
         if not isinstance(evidence, dict) or evidence.get('method') != 'short_lift_motion_v1':
@@ -107,12 +116,17 @@ def summarise_by_rule(meta_paths):
         else:
             setting = 'default'
         counts = summary.setdefault(grasp_rule(meta), {}).setdefault(
-            setting, {'held': 0, 'not_held': 0, 'unlabelled': 0, 'aborted': 0})
+            setting, {'held': 0, 'not_held': 0, 'unlabelled': 0, 'aborted': 0,
+                      'camera_labelled': 0})
+        success = episode_success(meta)
         if meta.get('outcome') != 'completed':
             counts['aborted'] += 1
-        elif meta.get('human_success') is True:
+            continue
+        if meta.get('human_success') is None and success is not None:
+            counts['camera_labelled'] += 1
+        if success is True:
             counts['held'] += 1
-        elif meta.get('human_success') is False:
+        elif success is False:
             counts['not_held'] += 1
         else:
             counts['unlabelled'] += 1
@@ -126,13 +140,17 @@ def print_summary(summary):
             counts = summary[rule].get(setting)
             if counts is None:
                 continue
-            labelled = counts['held'] + counts['not_held']
-            rate = ('{}/{} held'.format(counts['held'], labelled)
-                    if labelled else 'no labelled grasps')
+            # Divide by every completed grasp, not only the labelled ones: the
+            # camera mostly abstains on misses, so leaving its abstentions out
+            # would flatter unattended runs.
+            completed = counts['held'] + counts['not_held'] + counts['unlabelled']
+            rate = ('{}/{} held'.format(counts['held'], completed)
+                    if completed else 'no completed grasps')
             print('  {:<16} {:<10} {:<14} not held {}, unlabelled {}, '
-                  'aborted before closing {}'.format(
+                  'aborted before closing {}, labelled by camera only {}'.format(
                       rule, setting, rate, counts['not_held'],
-                      counts['unlabelled'], counts['aborted']))
+                      counts['unlabelled'], counts['aborted'],
+                      counts['camera_labelled']))
 
 
 def main():

@@ -53,6 +53,7 @@ class ShortLiftRewardTests(unittest.TestCase):
             self.assertEqual(counts, {
                 'human_labeled': 3, 'agree': 1, 'disagree': 1,
                 'auto_abstained': 1, 'human_unknown': 1, 'without_auto': 1,
+                'auto_only': 0,
             })
 
     def test_short_lift_still_releases_and_homes_after_label(self):
@@ -78,10 +79,11 @@ class ShortLiftRewardTests(unittest.TestCase):
         release = ([70, 9, 68, 30, 90, 164], 10.4)
         with mock.patch.object(pick, 'low_release_pose', side_effect=[lift, release]):
             with mock.patch('pc_client.red_rl.collect.ask_success', return_value=True):
-                human, automatic = short_lift_and_release(
+                human, automatic, relocation = short_lift_and_release(
                     session, [70, 6, 70, 31, 90, 164], None, demo)
         self.assertIs(human, True)
         self.assertIs(automatic['success'], True)
+        self.assertIsNone(relocation)       # attended runs put it back in place
         self.assertEqual(len(session.commands), 4)
         self.assertEqual(session.commands[-1], list(arm_control.HOME_POSE))
 

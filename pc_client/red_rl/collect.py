@@ -3,10 +3,17 @@
 Run as ``python -m pc_client.red_rl.collect`` from the repository root. Only
 align/descend/creep actions are learning data. Wrist orientation, closing,
 short verification lift and release remain deterministic.
+
+With ``--auto`` nobody is asked for a label: the camera's short-lift verdict
+is recorded as the label, a held sweet is put down gently at a random spot
+the next trial can reach, and anything but a confirmed hold exits with
+EXIT_NOT_HELD so an unattended session stops.
 """
 
 import argparse
 import math
+import random
+import time
 from types import SimpleNamespace
 
 import arm_control
@@ -14,9 +21,15 @@ import gripper_state
 import kinematics
 import reach_candy
 import pick_and_place as pick
-from pc_client.red_rl.dataset import CURRENT_GRASP_RULE, EpisodeRecorder, features
+from pc_client.red_rl import relocate
+from pc_client.red_rl.dataset import (AUTO_LABEL_SOURCE, CURRENT_GRASP_RULE,
+                                      HUMAN_LABEL_SOURCE, EpisodeRecorder, features)
 from pc_client.red_rl.auto_reward import assess_short_lift
 from pc_client.red_rl.shadow import ShadowPolicy, episode_report
+
+# Exit status of an --auto trial that completed but did not confirm a hold:
+# the camera said NOT HELD or could not tell. The session stops on it.
+EXIT_NOT_HELD = 3
 
 
 # At high HOME height the integer-degree arm can stop improving around 26 px.
@@ -116,6 +129,14 @@ def arguments():
     parser.add_argument('--shadow-model', metavar='PATH',
                         help='Evaluate this model alongside teacher actions; '
                              'model output is NEVER sent to the arm.')
+    parser.add_argument('--auto', action='store_true',
+                        help='Unattended: record the camera verdict as the label, put '
+                             'a held sweet down at a random reachable spot, and exit '
+                             'with status {} unless the hold was confirmed.'.format(
+                                 EXIT_NOT_HELD))
+    parser.add_argument('--seed', type=int,
+                        help='Seed for the --auto placement; default from the clock. '
+                             'Recorded in the episode either way.')
     cli = parser.parse_args()
     if cli.grasp_offset_mm is not None and not 0.0 <= cli.grasp_offset_mm <= 10.0:
         parser.error('--grasp-offset-mm must be between 0 and 10')
@@ -141,6 +162,8 @@ def arguments():
         pregrasp_retract_j4_deg=cli.pregrasp_retract_j4_deg,
         pregrasp_base_mm=cli.pregrasp_base_mm,
         pregrasp_down_mm=cli.pregrasp_down_mm,
+        auto=cli.auto,
+        seed=cli.seed if cli.seed is not None else int(time.time() * 1000) % 2 ** 32,
     )
 
 
@@ -270,8 +293,13 @@ def offset_pregrasp(session, state, base_mm, down_mm):
     return fresh
 
 
-def short_lift_and_release(session, grasp_pose, state, demo):
-    """Fixed post-policy routine; never part of the learned action target."""
+def short_lift_and_release(session, grasp_pose, state, demo, auto=False, rng=None):
+    """Fixed post-policy routine; never part of the learned action target.
+
+    Returns (human_success, auto_evidence, relocation). With `auto` there is
+    no question: a confirmed hold is carried to a random reachable spot and
+    `relocation` describes where; anything else is put down where it was.
+    """
     lift, actual_rise = pick.low_release_pose(grasp_pose, clearance_mm=35.0)
     if actual_rise < 20.0 or actual_rise > 50.0:
         raise RuntimeError('No safe short lift on the known path: {:.1f} mm'.format(
@@ -295,14 +323,27 @@ def short_lift_and_release(session, grasp_pose, state, demo):
     auto_evidence = assess_short_lift(previous, after_px, predicted, actual_rise)
     auto_evidence['image_before'] = before_image
     auto_evidence['image_after'] = after_image
-    human_success = ask_success()
+    human_success = None if auto else ask_success()
     auto_label = {True: 'HELD', False: 'NOT HELD', None: 'INCONCLUSIVE'}[
         auto_evidence['success']]
-    print('  automatic camera suggestion: {} ({})'.format(
-        auto_label, auto_evidence['reason']))
+    print('  automatic camera {}: {} ({})'.format(
+        'label' if auto else 'suggestion', auto_label, auto_evidence['reason']))
     if human_success is not None and auto_evidence['success'] is not None:
         print('  comparison with your label: {}'.format(
             'agrees' if human_success == auto_evidence['success'] else 'DISAGREES'))
+
+    if auto and auto_evidence['success'] is True:
+        route = relocate.plan(grasp_pose, lift, rng)
+        if route is not None:
+            image = relocate.execute(
+                session, route,
+                snapshot=lambda: _audit_image(session, demo, 'relocated.jpg'))
+            relocation = {key: route[key] for key in (
+                'radius_mm', 'azimuth_deg', 'xy_mm', 'moved_mm',
+                'turn', 'carry', 'release', 'clear')}
+            relocation['image'] = image
+            return human_success, auto_evidence, relocation
+        print('  no checked route to a new spot; putting it back where it was')
 
     print('=== fixed low release ===')
     release, clearance = pick.low_release_pose(grasp_pose, clearance_mm=10.0)
@@ -313,7 +354,7 @@ def short_lift_and_release(session, grasp_pose, state, demo):
     session.send(opened, 1200, 2.5)
     session.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS,
                  arm_control.HOMING_TIME_MS / 1000.0 + 1.0)
-    return human_success, auto_evidence
+    return human_success, auto_evidence, None
 
 
 def main():
@@ -321,7 +362,8 @@ def main():
     shadow = ShadowPolicy(args.shadow_model) if args.shadow_model else None
     if args.execute:
         print('The REAL arm will return HOME, approach the red sweet, close, '
-              'lift, and release near the table.')
+              'lift, and release near the table{}.'.format(
+                  ' at a random reachable spot' if args.auto else ''))
         print('Clear the work area and be ready to cut power.')
         if not arm_control.confirm_execute():
             raise SystemExit('Cancelled.')
@@ -360,6 +402,8 @@ def main():
         demo = EpisodeRecorder(args.dataset, {
             'source': 'pick_and_place rule teacher', 'task': 'red_sweet_approach',
             'grasp_rule': CURRENT_GRASP_RULE,
+            'label_source': AUTO_LABEL_SOURCE if args.auto else HUMAN_LABEL_SOURCE,
+            'relocation_seed': args.seed if args.auto else None,
             'grasp_profile': ('red_fixed_wrist_clipped_compensation'
                               if session.lock_clipped_target else
                               'red_fixed_wrist_no_clipped_compensation'),
@@ -425,9 +469,13 @@ def main():
             pregrasp_down_fk_mm=start_fk[2] - end_fk[2])
         state = pick.grip(session, state)
         grasp_pose = list(session.pose)
-        human_success, auto_evidence = short_lift_and_release(
-            session, grasp_pose, state, demo)
+        human_success, auto_evidence, relocation = short_lift_and_release(
+            session, grasp_pose, state, demo, auto=args.auto,
+            rng=random.Random(args.seed))
+        demo.metadata['relocation'] = relocation
         outcome = 'completed'
+        if args.auto and auto_evidence['success'] is not True:
+            return EXIT_NOT_HELD
         return 0
     finally:
         if demo is not None:
