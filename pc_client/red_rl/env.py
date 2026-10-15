@@ -45,7 +45,13 @@ from pc_client.red_rl import collect
 
 MAX_STEPS = 20
 LOST_LIMIT = 2
-START_OFFSET_MM = dict(radial=(-12.0, 12.0), lateral=(-12.0, 12.0), up=(0.0, 10.0))
+# The gripper pixel sits 40 px above the bottom of the frame, so an outward
+# offset pushes the sweet toward the edge: +10.9 and +9.8 mm started it at
+# y = 702 and 710 of 720, and a third outward start lost it altogether.
+# Inward has the whole frame to spare.
+START_OFFSET_MM = dict(radial=(-12.0, 6.0), lateral=(-12.0, 12.0), up=(0.0, 10.0))
+START_ATTEMPTS = 3
+MM_PER_PX = 0.17                 # near the table: about range / focal length
 BOX_HALF_WIDTH_MM = 30.0         # horizontal distance allowed from the start
 BELOW_GRASP_LIMIT_MM = 3.0       # lowest point: this far under the grasp height
 STEP_MS = 600
@@ -211,6 +217,41 @@ class RedSweetApproachEnv(gym.Env):
             return candidate, achieved, True
         return list(pose), np.zeros(3), True
 
+    def _predict_px(self, before, after):
+        """Where a still sweet should appear after a move of several mm.
+
+        The image Jacobian was measured high above the table and underestimates
+        shifts down here; a metric scale does better for the start offset. A
+        gripper moved outward sees the sweet lower (+y), moved left sees it to
+        the left (-x).
+        """
+        moved = cartesian.base_to_local(
+            before, kinematics.gripper_mm(after) - kinematics.gripper_mm(before))
+        x, y = self.session.last_px
+        return (x - moved[1] / MM_PER_PX, y + moved[0] / MM_PER_PX)
+
+    def _start_offset(self):
+        """Offset the gripper at random; retry from the descent pose if lost."""
+        session = self.session
+        descent_pose = list(session.pose)
+        anchor = session.last_px
+        for attempt in range(1, START_ATTEMPTS + 1):
+            request = [self.rng.uniform(*START_OFFSET_MM[key])
+                       for key in ('radial', 'lateral', 'up')]
+            start = cartesian.offset(descent_pose, request, self.pitch_sum)
+            predicted = self._predict_px(descent_pose, start)
+            session.send(start, 900, 1.5)
+            self.state = session.look(predicted)
+            if self.state is not None:
+                return request, attempt
+            print('  start offset {} lost the sweet; back to the descent pose'.format(
+                [round(v, 1) for v in request]))
+            session.send(descent_pose, 900, 1.5)
+            session.last_px = anchor
+            if session.look(anchor) is None:
+                break
+        raise RuntimeError('Target lost after the start offset')
+
     def _target(self, state):
         return None if state is None else (state['cx'], state['cy'], state['area'])
 
@@ -268,15 +309,7 @@ class RedSweetApproachEnv(gym.Env):
                                    'cannot calibrate forward kinematics')
             self.bias_mm = state['height'] - kinematics.gripper_height_mm(session.pose)
             self.pitch_sum = sum(session.pose[1:4])
-            request = [self.rng.uniform(*START_OFFSET_MM[key])
-                       for key in ('radial', 'lateral', 'up')]
-            start = cartesian.offset(session.pose, request, self.pitch_sum)
-            delta = tuple(start[j] - session.pose[j] for j in range(4))
-            predicted = reach_candy.predict_target(session.last_px, delta)
-            session.send(start, 900, 1.5)
-            self.state = session.look(predicted)
-            if self.state is None:
-                raise RuntimeError('Target lost after the start offset')
+            request, attempts = self._start_offset()
         except BaseException:
             self._go_home()
             raise
@@ -286,6 +319,7 @@ class RedSweetApproachEnv(gym.Env):
             'stop_height_mm': session.stop_height_mm,
             'bias_mm': self.bias_mm,
             'start_offset_request_mm': [round(v, 2) for v in request],
+            'start_offset_attempts': attempts,
             'start_pose': list(session.pose),
             'pose_is_commanded_not_measured': True,
         })

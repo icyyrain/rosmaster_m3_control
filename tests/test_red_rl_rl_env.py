@@ -84,6 +84,7 @@ class EnvTests(unittest.TestCase):
 
         def descend(sess, state):
             sess.pose = list(descent_pose)
+            sess.last_px = (705.0, 675.0)       # the real descent's last look
             return {'cx': 705.0, 'cy': 675.0, 'area': 2500, 'height': height}
         with mock.patch.object(red_env.pick, 'preflight', return_value=True), \
                 mock.patch.object(red_env.collect, 'align_teacher',
@@ -105,6 +106,41 @@ class EnvTests(unittest.TestCase):
                 50.0 - kinematics.gripper_height_mm([90, 18, 62, 24, 90, 90]))
             json.dumps(_to_wire(info))                  # survives the wire
             self.assertEqual(_from_wire(json.loads(json.dumps(_to_wire(info)))), info)
+
+    def test_lost_start_offset_is_retried_from_the_descent_pose(self):
+        import tempfile
+        found = {'cx': 700.0, 'cy': 660.0, 'area': 3000, 'height': 30.0}
+        with tempfile.TemporaryDirectory() as folder:
+            environment, session = self.make_env(folder)
+            session.look.side_effect = [None, found, found]
+            observation, info = self.reset(environment, session)
+            self.assertEqual(observation[2], 1.0)
+            self.assertIn([90, 18, 62, 24, 90, 90], session.sent)   # went back
+            meta = environment.audit.meta
+            self.assertEqual(meta['start_offset_attempts'], 2)
+            self.assertLessEqual(meta['start_offset_request_mm'][0],
+                                 red_env.START_OFFSET_MM['radial'][1])
+
+    def test_start_offset_that_keeps_losing_the_sweet_stops(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            environment, session = self.make_env(folder)
+            found = {'cx': 700.0, 'cy': 660.0, 'area': 3000, 'height': 30.0}
+            session.look.side_effect = [None, found] * red_env.START_ATTEMPTS
+            with self.assertRaisesRegex(RuntimeError, 'start offset'):
+                self.reset(environment, session)
+            self.assertEqual(session.sent[-1], list(red_env.arm_control.HOME_POSE))
+
+    def test_offset_prediction_follows_the_image_axes(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            environment, session = self.make_env(folder)
+            session.last_px = (700.0, 650.0)
+            pose = [90, 18, 62, 24, 90, 90]
+            outward = cartesian.offset(pose, [8, 0, 0], sum(pose[1:4]))
+            leftward = cartesian.offset(pose, [0, 8, 0], sum(pose[1:4]))
+            self.assertGreater(environment._predict_px(pose, outward)[1], 650 + 30)
+            self.assertLess(environment._predict_px(pose, leftward)[0], 700 - 30)
 
     def test_failed_reset_goes_home_and_raises(self):
         import tempfile

@@ -21,7 +21,7 @@ import numpy as np
 from pc_client.red_rl import cartesian
 from pc_client.red_rl import env as red_env
 
-MM_PER_PX = 0.17                 # near the table: about range / focal length
+MM_PER_PX = red_env.MM_PER_PX
 HORIZONTAL_GAIN = 0.8            # under-correct a little; the loop closes it
 ALIGN_PX = 25.0                  # the rule teacher's re-centre tolerance
 SLOW_DESCENT_PX = 60.0           # descend slowly while further off than this
