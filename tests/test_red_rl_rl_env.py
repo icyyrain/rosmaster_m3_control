@@ -43,6 +43,20 @@ class CartesianTests(unittest.TestCase):
             self.assertGreater(achieved[0], 2.5)
             self.assertLess(abs(achieved[1]), 1.0)
 
+    def test_reaching_out_while_descending_does_not_fold_onto_the_stop(self):
+        # The real episode that stuck: start pose of 20261015-111334, where
+        # holding the tilt within 2 degrees folded joint 2 down to 0.
+        pose = [78, 21, 59, 29, 90, 90]
+        pitch = sum(pose[1:4])
+        total = np.zeros(3)
+        for _ in range(10):
+            pose, achieved = cartesian.step(pose, [4, 0, -3], pitch)
+            total += achieved
+        self.assertGreater(total[0], 20.0)
+        self.assertLess(total[2], -15.0)
+        self.assertGreaterEqual(pose[1], cartesian.JOINT2_FLOOR_DEG)
+        self.assertLessEqual(abs(sum(pose[1:4]) - pitch), cartesian.PITCH_TOLERANCE_DEG)
+
     def test_offset_walks_further_than_one_step(self):
         pose = POSES[0]
         moved = cartesian.offset(pose, [10, -8, 6], sum(pose[1:4]))

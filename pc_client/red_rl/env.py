@@ -136,6 +136,34 @@ class AuditLog:
         self.path = None
 
 
+def safe_step(pose, request_mm, pitch_sum, height_of, lowest_mm, start_xy):
+    """cartesian.step with the safety box applied as clipping, as HIL-SERL does.
+
+    A step that would go below `lowest_mm` loses its downward part; one that
+    would drift more than BOX_HALF_WIDTH_MM from `start_xy` loses its
+    horizontal part. If what is left still breaks the box, the arm stays put.
+    Returns (pose, achieved_local_mm, clipped).
+    """
+    def violations(candidate):
+        position = kinematics.gripper_mm(candidate)
+        drift = math.hypot(position[0] - start_xy[0], position[1] - start_xy[1])
+        return height_of(candidate) < lowest_mm, drift > BOX_HALF_WIDTH_MM
+
+    candidate, achieved = cartesian.step(pose, request_mm, pitch_sum)
+    too_low, too_far = violations(candidate)
+    if not (too_low or too_far):
+        return candidate, achieved, False
+    fallback = np.asarray(request_mm, dtype=float)
+    if too_low:
+        fallback[2] = max(0.0, fallback[2])
+    if too_far:
+        fallback[:2] = 0.0
+    candidate, achieved = cartesian.step(pose, fallback, pitch_sum)
+    if not any(violations(candidate)):
+        return candidate, achieved, True
+    return list(pose), np.zeros(3), True
+
+
 def _fresh_episode(session):
     """Clear what one episode leaves in a reused Session.
 
@@ -188,34 +216,9 @@ class RedSweetApproachEnv(gym.Env):
         return max(pick.HEIGHT_FLOOR_MM,
                    self.session.stop_height_mm - BELOW_GRASP_LIMIT_MM)
 
-    def _violations(self, pose):
-        """(too_low, too_far) for a candidate pose."""
-        position = kinematics.gripper_mm(pose)
-        drift = math.hypot(position[0] - self.start_xy[0],
-                           position[1] - self.start_xy[1])
-        return self._height(pose) < self._lowest(), drift > BOX_HALF_WIDTH_MM
-
     def _safe_step(self, request_mm):
-        """cartesian.step with the box applied as clipping, as HIL-SERL does.
-
-        A step that would go too low loses its downward part; one that would
-        go too far loses its horizontal part. If what is left still breaks
-        the box, the arm stays put.
-        """
-        pose = self.session.pose
-        candidate, achieved = cartesian.step(pose, request_mm, self.pitch_sum)
-        too_low, too_far = self._violations(candidate)
-        if not (too_low or too_far):
-            return candidate, achieved, False
-        fallback = np.asarray(request_mm, dtype=float)
-        if too_low:
-            fallback[2] = max(0.0, fallback[2])
-        if too_far:
-            fallback[:2] = 0.0
-        candidate, achieved = cartesian.step(pose, fallback, self.pitch_sum)
-        if not any(self._violations(candidate)):
-            return candidate, achieved, True
-        return list(pose), np.zeros(3), True
+        return safe_step(self.session.pose, request_mm, self.pitch_sum,
+                         self._height, self._lowest(), self.start_xy)
 
     def _predict_px(self, before, after):
         """Where a still sweet should appear after a move of several mm.
@@ -379,57 +382,98 @@ class RedSweetApproachEnv(gym.Env):
 
 
 class FakeRedSweetEnv(gym.Env):
-    """Same spaces and episode shape, no robot: for wiring up the learner.
+    """Same spaces and episode shape, no robot: for the learner and for tests.
 
-    A point gripper above a point sweet. Actions move it by up to
-    cartesian.MAX_STEP_MM with a little noise; closing succeeds when it is
-    within 4 mm horizontally and 3 mm of the grasp height. Pixel offsets use
-    the real arm's scale near the table, about 0.18 mm per pixel.
+    Kinematic, not a toy: actions go through the same cartesian.step, forward
+    kinematics and safety clipping as the real arm, so joint limits, folding
+    and a sweet pushed out of the frame show up here first. The sweet sits
+    under the gripper at the end of a typical rule descent, a few millimetres
+    off, 25-30 mm below; the start is offset with START_OFFSET_MM as on the
+    real arm. The image uses 0.18 mm per pixel, deliberately not the 0.17 the
+    expert assumes, with a little pixel and height noise. Closing holds the
+    sweet within 4 mm horizontally and 3 mm of its grasp height.
     """
 
     metadata = dict(RedSweetApproachEnv.metadata, name='red_sweet_last_cm_fake')
     MM_PER_PX = 0.18
+    FRAME = (1280.0, 720.0)
 
     def __init__(self, seed=None):
         super().__init__()
         self.observation_space = observation_space()
         self.action_space = action_space()
         self.rng = np.random.default_rng(seed)
-        self.offset = None
+        self.pose = None
+        self.sweet = None
         self.steps = 0
+        self.lost = 0
+
+    def _relative(self):
+        """(radial, lateral, height above grasp) of the gripper over the sweet."""
+        local = cartesian.base_to_local(self.pose,
+                                        kinematics.gripper_mm(self.pose) - self.sweet)
+        return local
+
+    def _height(self, pose):
+        return float(kinematics.gripper_mm(pose)[2] - self.sweet[2])
 
     def _observation(self):
-        # offset = gripper minus sweet: (radial, lateral, height above grasp).
-        # On the real arm a gripper beyond the sweet sees it lower in the
-        # image (+y), and one to the sweet's left sees it to the left (-x).
-        radial, lateral, height = self.offset
-        target = (reach_candy.GRIPPER_PX[0] - lateral / self.MM_PER_PX,
-                  reach_candy.GRIPPER_PX[1] + radial / self.MM_PER_PX, 4000.0)
-        pose = [90, 12 + height / 4.0, 56, 32]
-        return encode(target, height, pose, self.steps)
+        radial, lateral, height = self._relative()
+        x = (reach_candy.GRIPPER_PX[0] - lateral / self.MM_PER_PX
+             + self.rng.normal(0.0, 2.0))
+        y = (reach_candy.GRIPPER_PX[1] + radial / self.MM_PER_PX
+             + self.rng.normal(0.0, 2.0))
+        visible = 0.0 <= x < self.FRAME[0] and 0.0 <= y < self.FRAME[1]
+        self.lost = 0 if visible else self.lost + 1
+        return encode((x, y, 4000.0) if visible else None,
+                      height + self.rng.normal(0.0, 0.3), self.pose, self.steps)
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         if seed is not None:
             self.rng = np.random.default_rng(seed)
         self.steps = 0
-        self.offset = np.asarray([
-            self.rng.uniform(*START_OFFSET_MM['radial']),
-            self.rng.uniform(*START_OFFSET_MM['lateral']),
-            25.0 + self.rng.uniform(*START_OFFSET_MM['up'])])
+        self.lost = 0
+        descent = [int(self.rng.integers(80, 101)), 18, 62,
+                   int(self.rng.integers(18, 31)), 90, 90]
+        self.pitch_sum = sum(descent[1:4])
+        below = kinematics.gripper_mm(descent)
+        misalign = cartesian.local_to_base(
+            descent, [*self.rng.normal(0.0, 3.0, 2), 0.0])
+        self.sweet = below + misalign - np.asarray(
+            [0.0, 0.0, self.rng.uniform(25.0, 30.0)])
+        # Like the real reset: redraw a start that loses the sweet.
+        for _ in range(START_ATTEMPTS):
+            request = [self.rng.uniform(*START_OFFSET_MM[key])
+                       for key in ('radial', 'lateral', 'up')]
+            self.pose = cartesian.offset(descent, request, self.pitch_sum)
+            if self._in_frame():
+                break
+        self.start_xy = kinematics.gripper_mm(self.pose)[:2].tolist()
         return self._observation(), {'fake': True}
+
+    def _in_frame(self):
+        radial, lateral, _ = self._relative()
+        x = reach_candy.GRIPPER_PX[0] - lateral / self.MM_PER_PX
+        y = reach_candy.GRIPPER_PX[1] + radial / self.MM_PER_PX
+        return 0.0 <= x < self.FRAME[0] and 0.0 <= y < self.FRAME[1]
 
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
         self.steps += 1
         if action[3] > CLOSE_THRESHOLD:
-            held = (math.hypot(self.offset[0], self.offset[1]) <= 4.0
-                    and abs(self.offset[2]) <= 3.0)
+            radial, lateral, height = self._relative()
+            held = math.hypot(radial, lateral) <= 4.0 and abs(height) <= 3.0
             return (self._observation(), float(held), True, False,
                     {'fake': True, 'outcome': 'held' if held else 'not_held'})
-        move = action[:3] * cartesian.MAX_STEP_MM + self.rng.normal(0.0, 0.5, 3)
-        self.offset = self.offset + move
-        self.offset[2] = max(self.offset[2], -BELOW_GRASP_LIMIT_MM)
+        self.pose, _, clipped = safe_step(
+            self.pose, action[:3] * cartesian.MAX_STEP_MM, self.pitch_sum,
+            self._height, -BELOW_GRASP_LIMIT_MM, self.start_xy)
+        observation = self._observation()
+        info = {'fake': True, 'clipped': bool(clipped), 'outcome': None}
+        if self.lost >= LOST_LIMIT:
+            return observation, 0.0, True, False, dict(info, outcome='target_lost')
         truncated = self.steps >= MAX_STEPS
-        return (self._observation(), 0.0, False, truncated,
-                {'fake': True, 'outcome': 'step_limit' if truncated else None})
+        if truncated:
+            info['outcome'] = 'step_limit'
+        return observation, 0.0, False, truncated, info

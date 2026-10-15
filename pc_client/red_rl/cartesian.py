@@ -4,8 +4,18 @@ The policy acts like HIL-SERL's end-effector delta: a few millimetres along
 three axes. The arm only takes whole servo degrees, about 3 mm of gripper
 motion each near the table, so every step searches the nearby integer poses
 for the one whose forward-kinematics gripper position lands closest to the
-request. Joints 2+3+4 are held at the episode's starting sum, which keeps the
-jaws, and the camera on arm4, at a fixed tilt; joint 5 never moves.
+request. Joint 5 never moves.
+
+The tilt of the jaws (joints 2+3+4) may wander PITCH_TOLERANCE_DEG from the
+episode's start at a small cost. Holding it within 2 degrees, as a first
+version did, left only one way down: fold joint 2 back while opening joint 3.
+Ten such steps drove joint 2 onto its 0 degree stop, after which the arm
+could no longer reach outward at all; one real episode spent its last nine
+steps stuck there. Reaching out is joint 4's job, which tilts the jaws, as
+the rule teacher does (its grasps span about 20 degrees of tilt). A barrier
+keeps joint 2 off its stop. In a kinematic simulation of 80 harder starts
+this closed on the sweet 75 times against 61, and ten "out 4 mm, down 3 mm"
+requests reached 28 mm outward instead of 10.
 
 Axes are local to the arm's current heading, so an action means the same
 thing whichever way the base is turned: `radial` away from the base, `lateral`
@@ -22,8 +32,11 @@ import pick_and_place as pick
 
 MAX_STEP_MM = 4.0
 JOINT_REACH_DEG = 2
-PITCH_TOLERANCE_DEG = 2
+PITCH_TOLERANCE_DEG = 10
+PITCH_PENALTY = 0.03             # mm^2 per degree^2 of tilt away from the start
 MOTION_PENALTY = 0.05            # mm^2 per degree^2: prefer the smaller move
+JOINT2_FLOOR_DEG = 6             # keep joint 2 clear of its 0 degree stop
+FLOOR_PENALTY = 25.0             # mm^2 per degree^2 below that
 
 _DELTAS = np.asarray(list(itertools.product(
     range(-JOINT_REACH_DEG, JOINT_REACH_DEG + 1), repeat=4)), dtype=int)
@@ -65,8 +78,10 @@ def step(pose, local_mm, pitch_sum):
     request = np.clip(np.asarray(local_mm, dtype=float), -MAX_STEP_MM, MAX_STEP_MM)
     origin = kinematics.gripper_mm(pose)
     target = origin + local_to_base(pose, request)
-    best_pose, best_cost = list(pose), float(np.sum(request ** 2))
-    best_position = origin
+    best_pose, best_position = list(pose), origin
+    best_cost = (float(np.sum(request ** 2))           # standing still
+                 + PITCH_PENALTY * (sum(pose[1:4]) - pitch_sum) ** 2
+                 + FLOOR_PENALTY * max(0, JOINT2_FLOOR_DEG - pose[1]) ** 2)
     for delta in _DELTAS:
         if not delta.any():
             continue
@@ -75,11 +90,14 @@ def step(pose, local_mm, pitch_sum):
             candidate[joint] = int(pose[joint] + delta[joint])
         if not in_bounds(candidate):
             continue
-        if abs(sum(candidate[1:4]) - pitch_sum) > PITCH_TOLERANCE_DEG:
+        tilt = sum(candidate[1:4]) - pitch_sum
+        if abs(tilt) > PITCH_TOLERANCE_DEG:
             continue
         position = kinematics.gripper_mm(candidate)
         cost = (float(np.sum((position - target) ** 2))
-                + MOTION_PENALTY * float(np.sum(delta ** 2)))
+                + MOTION_PENALTY * float(np.sum(delta ** 2))
+                + PITCH_PENALTY * tilt ** 2
+                + FLOOR_PENALTY * max(0, JOINT2_FLOOR_DEG - candidate[1]) ** 2)
         if cost < best_cost:
             best_pose, best_cost, best_position = candidate, cost, position
     return best_pose, base_to_local(pose, best_position - origin)
