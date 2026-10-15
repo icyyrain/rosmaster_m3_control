@@ -250,22 +250,46 @@ class UnattendedSessionTests(unittest.TestCase):
             return mock.Mock(returncode=status)
         return run
 
-    def test_held_trial_continues(self):
-        with tempfile.TemporaryDirectory() as folder:
-            meta = {'steps': 30, 'relocation': {'moved_mm': 41.0, 'radius_mm': 220.0,
-                                                'azimuth_deg': 5.0}}
-            with mock.patch.object(run_session.subprocess, 'run',
-                                   side_effect=self.fake_trial(folder, 0, meta)):
-                self.assertTrue(run_session.collect_auto(Path(folder)))
-
-    def test_unconfirmed_or_failed_trial_stops(self):
-        for status, meta in ((collect.EXIT_NOT_HELD,
-                              {'auto_success': None, 'auto_evidence': {'reason': 'x'}}),
-                             (1, {'outcome': 'align_failed'})):
+    def test_trial_outcomes(self):
+        cases = (
+            (0, {'steps': 30, 'relocation': {'moved_mm': 41.0, 'radius_mm': 220.0,
+                                             'azimuth_deg': 5.0}}, ('held', True)),
+            (collect.EXIT_NOT_HELD, {'outcome': 'completed', 'auto_success': None,
+                                     'auto_evidence': {'reason': 'x'}}, ('missed', None)),
+            (collect.EXIT_NOT_HELD, {'outcome': 'completed', 'auto_success': False,
+                                     'auto_evidence': {'reason': 'x'}}, ('missed', False)),
+            (1, {'outcome': 'align_failed'}, ('stop', None)),
+        )
+        for status, meta, expected in cases:
             with tempfile.TemporaryDirectory() as folder:
                 with mock.patch.object(run_session.subprocess, 'run',
                                        side_effect=self.fake_trial(folder, status, meta)):
-                    self.assertFalse(run_session.collect_auto(Path(folder)))
+                    result, name, label = run_session.collect_auto(Path(folder))
+            self.assertEqual((result, label), expected)
+            self.assertEqual(name, 'ep')
+
+    def run_loop(self, outcomes, count=10, max_misses=2):
+        calls = iter(outcomes)
+        with mock.patch.object(run_session, 'collect_auto',
+                               side_effect=lambda *_: next(calls)) as trial:
+            completed = run_session.unattended(Path('.'), count, (), max_misses)
+        return completed, trial.call_count
+
+    def test_a_held_trial_resets_the_miss_count(self):
+        outcomes = [('missed', 'a', None), ('held', 'b', True),
+                    ('missed', 'c', False), ('held', 'd', True)]
+        self.assertEqual(self.run_loop(outcomes, count=4), (4, 4))
+
+    def test_two_misses_in_a_row_stop(self):
+        outcomes = [('held', 'a', True), ('missed', 'b', None),
+                    ('missed', 'c', False), ('held', 'never', True)]
+        self.assertEqual(self.run_loop(outcomes), (3, 3))
+        self.assertEqual(self.run_loop(outcomes[:2] + outcomes[3:], count=3,
+                                       max_misses=1), (2, 2))
+
+    def test_any_other_failure_stops_at_once(self):
+        outcomes = [('held', 'a', True), ('stop', None, None), ('held', 'never', True)]
+        self.assertEqual(self.run_loop(outcomes), (1, 2))
 
 
 if __name__ == '__main__':
