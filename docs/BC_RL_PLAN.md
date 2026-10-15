@@ -140,14 +140,35 @@ S3/S4 的接管条件（只在明显要出错时，避免退化成“抄老师�
 | `red_rl/record_demos.py` | 无人值守采专家示教 | `run_session` 的无人值守循环 |
 | 学习端 | SAC（+ BC 预训练），在 WSL 的 Ubuntu-22.04 | 仿真项目已跑通的官方 HIL-SERL `SACAgent`，S1 可参考那边的 BC 预训练实现 |
 
-学习端放在 WSL：机械臂这边的 Windows 环境是 Python 3.14、没有 torch/JAX，而仿真
-项目已在 WSL 里跑通官方代码。机器人接口（roslibpy）是纯 Python，可以一起放进 WSL；
-第一步要确认 WSL 能稳定连到小车 `192.168.2.4:9090` 并拿到相机流（注意文档里提到的
-FlClash 虚拟网卡问题）。连不稳就改成“Windows 跑环境、WSL 跑学习端”，两边传数据。
+**结构（M0 已定，和仿真项目相同）：Windows 跑环境，WSL 跑学习端。**
+
+- `python -m pc_client.red_rl.env_server --execute` 在 Windows 现有 `.venv` 里打开
+  小车环境（roslibpy 连小车），端口 18766（仿真项目用 18765）；所有 reset/step 都在
+  持有 rosbridge 连接的主线程执行。`--fake` 是不连机械臂的假环境，`--check` 只做相机
+  预检、不动机械臂。
+- WSL 学习端（`/root/.venvs/hil-serl-c32939b`，JAX 0.4.35 + GPU）直接用仿真项目的
+  `isaaclab_hil_serl.protocol.RemoteEnv` 连 `vEthernet (WSL)` 的 Windows 地址。
+  `pc_client/red_rl/rpc/` 是那套协议的原样拷贝，双方连接时校验协议版本。
+- 观测是 10 维扁平数组，动作是 4 维 [−1, 1]，和仿真环境的约定一致，学习端自己包成
+  `{"state": ...}`。仿真项目里已有 `make_state_sac_agent`、
+  `pretrain_state_sac_actor_with_bc`、`update_state_sac_with_bc`，S1/S2 直接复用。
+- 每回合在 `datasets/red_sweet_rl/<回合>/` 留审计记录（起点照片、每步动作与位姿、
+  抬升判定照片、结果），学习端的经验池另存。
+
+2026-10-15 M0 结果：
+- 末端位移换算：典型姿态附近，随机请求 ±4 mm 的平均误差约 1 mm、最大 2 mm，每步
+  计算约 22 ms；
+- WSL 用仿真项目原版 `RemoteEnv` 连 Windows 假环境：握手 0.03 s，每步往返 7.4 ms；
+- 真机 `--check`：相机、深度、预检全部通过，抓取高度 23.2 mm，机械臂未动；
+- 76 个单元测试全部通过。
+
+注意：闭爪动作用第 4 维连续值 > 0 判断，而不是官方单臂带夹爪配置里单独的离散夹爪
+critic。对“训出来”够用；以后上真机插线可按官方做法改。
 
 ## 12. 里程碑
 
-1. **M0 基础**：WSL 连通小车；`cartesian.py` 与 `env.py` 的单元测试；不动机械臂的空跑。
+1. **M0 基础** ✅（2026-10-15）：Windows 环境服务 + WSL 远程连通；`cartesian.py` 与
+   `env.py` 的单元测试；不动机械臂的真机预检。
 2. **M1 专家**：专家从随机起点上机 20 回合，成功率接近老师。
 3. **M2 示教**：无人值守采 30 条专家示教，校验格式。
 4. **M3 S1**：BC 训练 + 上机评估。
