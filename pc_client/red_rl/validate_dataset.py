@@ -7,6 +7,7 @@ from pathlib import Path
 
 import cv2
 
+from pc_client.red_rl.auto_reward import KNOWN_METHODS
 from pc_client.red_rl.dataset import (AUTO_LABEL_SOURCE, CURRENT_GRASP_RULE,
                                       FEATURE_NAMES, HUMAN_LABEL_SOURCE,
                                       LEGACY_GRASP_RULE, episode_success,
@@ -38,7 +39,7 @@ def validate_episode(folder):
         problems.append('camera-labelled episode has no lift evidence')
     if 'auto_evidence' in meta and meta['auto_evidence'] is not None:
         evidence = meta['auto_evidence']
-        if not isinstance(evidence, dict) or evidence.get('method') != 'short_lift_motion_v1':
+        if not isinstance(evidence, dict) or evidence.get('method') not in KNOWN_METHODS:
             problems.append('invalid automatic lift evidence')
         elif meta.get('auto_success') is not evidence.get('success'):
             problems.append('automatic verdict differs from saved evidence')

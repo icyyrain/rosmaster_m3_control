@@ -18,6 +18,16 @@ class ShortLiftRewardTests(unittest.TestCase):
         self.assertIs(result['success'], True)
         self.assertGreater(result['expected_stationary_motion_px'], 60)
 
+    def test_a_hold_that_slips_a_fifth_is_not_counted(self):
+        # 20261015-155642: moved 21 of 97 px on the lift and fell out while
+        # being carried. v1 called that HELD; v2 cannot tell.
+        before, stationary = (707.0, 680.0), (707.0, 777.0)
+        slipped = assess_short_lift(before, (707.0, 701.0), stationary, 35.0)
+        firm = assess_short_lift(before, (707.0, 688.0), stationary, 35.0)
+        self.assertIsNone(slipped['success'])
+        self.assertIs(firm['success'], True)
+        self.assertEqual(firm['method'], 'short_lift_motion_v2')
+
     def test_table_target_follows_stationary_prediction(self):
         result = assess_short_lift((670, 623), (670, 684), (669, 685), 35.6)
         self.assertIs(result['success'], False)

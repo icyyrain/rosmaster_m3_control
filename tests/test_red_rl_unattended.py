@@ -97,8 +97,9 @@ class RelocationPlanTests(unittest.TestCase):
             session.pose = list(pose)
         session.send.side_effect = send
         snapshot = mock.Mock(return_value='images/relocated.jpg')
-        self.assertEqual(relocate.execute(session, route, snapshot),
-                         'images/relocated.jpg')
+        result = relocate.execute(session, route, snapshot)
+        self.assertEqual(result['image'], 'images/relocated.jpg')
+        self.assertFalse(result['dropped'])
         self.assertEqual(sent[:3], [route['turn'], route['carry'], route['release']])
         self.assertEqual(sent[3][:5], route['release'][:5])
         self.assertEqual(sent[3][5], relocate.gripper_state.OPEN_CMD)
@@ -106,6 +107,40 @@ class RelocationPlanTests(unittest.TestCase):
         self.assertEqual(sent[5], list(relocate.arm_control.HOME_POSE))
         self.assertTrue(all(pose[4] == 90 for pose in sent))
         snapshot.assert_called_once_with()
+
+    def carry_session(self, look):
+        grasp = GRASPS[0]
+        lift, _ = pick.low_release_pose(grasp, clearance_mm=35.0)
+        route = relocate.plan(grasp, lift, random.Random(5))
+        session = mock.Mock()
+        session.pose = list(lift)
+        sent = []
+
+        def send(pose, duration, settle):
+            sent.append(list(pose))
+            session.pose = list(pose)
+        session.send.side_effect = send
+        session.look.return_value = look
+        return session, route, sent
+
+    def test_a_sweet_still_in_the_jaws_is_put_down(self):
+        session, route, sent = self.carry_session({'cx': 712.0, 'cy': 655.0})
+        result = relocate.execute(session, route, held_px=(705.0, 650.0))
+        self.assertFalse(result['dropped'])
+        self.assertEqual(result['carry_px'], (712.0, 655.0))
+        self.assertIn(route['release'], sent)
+
+    def test_a_dropped_sweet_is_not_put_down(self):
+        for look in (None, {'cx': 705.0, 'cy': 650.0 + relocate.CARRY_DRIFT_PX + 40}):
+            session, route, sent = self.carry_session(look)
+            snapshot = mock.Mock()
+            result = relocate.execute(session, route, snapshot, held_px=(705.0, 650.0))
+            self.assertTrue(result['dropped'])
+            self.assertNotIn(route['release'], sent)       # never lowered
+            self.assertEqual(sent[-2][:5], route['carry'][:5])
+            self.assertEqual(sent[-2][5], relocate.gripper_state.OPEN_CMD)
+            self.assertEqual(sent[-1], list(relocate.arm_control.HOME_POSE))
+            snapshot.assert_not_called()
 
 
 class UnattendedCollectorTests(unittest.TestCase):
@@ -122,16 +157,34 @@ class UnattendedCollectorTests(unittest.TestCase):
         held = {'success': True, 'reason': 'target_stayed_near_gripper_pixel'}
         with mock.patch.object(collect, 'assess_short_lift', return_value=dict(held)), \
                 mock.patch.object(collect, '_audit_image', return_value=None), \
-                mock.patch.object(collect.relocate, 'execute',
-                                  return_value='images/relocated.jpg') as execute, \
+                mock.patch.object(collect.relocate, 'execute', return_value=dict(
+                    dropped=False, carry_px=(709.0, 682.0),
+                    image='images/relocated.jpg')) as execute, \
                 mock.patch('builtins.input', side_effect=AssertionError('asked')):
             human, evidence, relocation = collect.short_lift_and_release(
                 session, grasp, {}, mock.Mock(), auto=True, rng=random.Random(2))
         self.assertIsNone(human)
         self.assertTrue(evidence['success'])
         execute.assert_called_once()
+        self.assertEqual(execute.call_args.kwargs['held_px'], (709.0, 682.0))
         self.assertEqual(relocation['image'], 'images/relocated.jpg')
+        self.assertFalse(relocation['dropped'])
         self.assertGreaterEqual(relocation['moved_mm'], relocate.MIN_MOVE_MM)
+
+    def test_a_drop_while_carrying_turns_the_label_into_a_failure(self):
+        grasp = GRASPS[0]
+        session = self.lift_session(grasp)
+        held = {'success': True, 'reason': 'target_stayed_near_gripper_pixel'}
+        with mock.patch.object(collect, 'assess_short_lift', return_value=dict(held)), \
+                mock.patch.object(collect, '_audit_image', return_value=None), \
+                mock.patch.object(collect.relocate, 'execute', return_value=dict(
+                    dropped=True, carry_px=None, image=None)):
+            _, evidence, relocation = collect.short_lift_and_release(
+                session, grasp, {}, mock.Mock(), auto=True, rng=random.Random(2))
+        self.assertIs(evidence['success'], False)
+        self.assertIs(evidence['lift_success'], True)
+        self.assertEqual(evidence['reason'], 'dropped_while_carrying')
+        self.assertTrue(relocation['dropped'])
 
     def test_auto_puts_back_in_place_when_not_confirmed(self):
         grasp = GRASPS[0]

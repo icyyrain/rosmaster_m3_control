@@ -35,6 +35,7 @@ HEIGHT_TOLERANCE_MM = 1.0
 POSITION_CHECK_MM = 3.5          # after rounding joint 1 to a whole degree
 PITCH_TOLERANCE_DEG = 8          # joints 2+3+4 against the grasp pose
 MS_PER_DEGREE = 60               # slow enough not to fling a held sweet
+CARRY_DRIFT_PX = 60.0            # a held sweet stays this close to its lift pixel
 MIN_MOVE_MS = 900
 
 SEARCH_J2 = np.arange(0, 46)
@@ -180,20 +181,54 @@ def move_ms(start, end):
     return max(MIN_MOVE_MS, int(MS_PER_DEGREE * largest))
 
 
-def execute(session, route, snapshot=None):
+def carried(session, held_px):
+    """Is the sweet still in the jaws? Look where it sat after the short lift.
+
+    A held sweet is rigid with the camera, so it stays near that pixel; one
+    dropped on the way is either out of view or somewhere else on the table.
+    Returns (still_held, pixel_or_None).
+    """
+    fresh = session.look(held_px)
+    if fresh is None:
+        return False, None
+    pixel = (fresh['cx'], fresh['cy'])
+    return math.hypot(pixel[0] - held_px[0], pixel[1] - held_px[1]) <= CARRY_DRIFT_PX, pixel
+
+
+def execute(session, route, snapshot=None, held_px=None):
     """Carry, lower, open, lift clear and go HOME. Joint 5 never moves.
 
+    With `held_px`, the pixel of the sweet after the short lift, the sweet is
+    checked at the carry pose before it is lowered: an operator saw one grasp
+    that passed the lift check fall out on the way. A dropped sweet is not
+    lowered onto; the jaws open where they are and the arm goes HOME.
+
     `snapshot` is called once the jaws have lifted clear of the released
-    sweet, for an audit photograph; its result is returned.
+    sweet, for an audit photograph. Returns dict(dropped, carry_px, image).
     """
     print('=== relocate ===')
     print('  to radius {radius_mm} mm, azimuth {azimuth_deg} deg, {moved_mm} mm '
           'from where it was picked up'.format(**route))
+    carry_px = None
     for name in ('turn', 'carry', 'release'):
         target = route[name]
         duration = move_ms(session.pose, target)
         print('  {:<8} {}'.format(name, target[:4]))
         session.send(target, duration, duration / 1000.0 + 0.8)
+        if name == 'carry' and held_px is not None:
+            still_held, carry_px = carried(session, held_px)
+            if not still_held:
+                print('  the sweet is no longer in the jaws (seen at {}, held at '
+                      '{:.0f},{:.0f}); not putting anything down'.format(
+                          'nowhere' if carry_px is None else
+                          '{:.0f},{:.0f}'.format(*carry_px), *held_px))
+                opened = list(session.pose)
+                opened[5] = gripper_state.OPEN_CMD
+                session.send(opened, 1200, 2.0)
+                session.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS,
+                             arm_control.HOMING_TIME_MS / 1000.0 + 1.0)
+                return dict(dropped=True, carry_px=carry_px, image=None)
+            print('  still held at {:.0f},{:.0f}'.format(*carry_px))
     opened = list(route['release'])
     opened[5] = gripper_state.OPEN_CMD
     session.send(opened, 1200, 2.0)
@@ -204,4 +239,4 @@ def execute(session, route, snapshot=None):
     image = snapshot() if snapshot is not None else None
     session.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS,
                  arm_control.HOMING_TIME_MS / 1000.0 + 1.0)
-    return image
+    return dict(dropped=False, carry_px=carry_px, image=image)

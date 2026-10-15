@@ -104,6 +104,18 @@ class DemoFileTests(unittest.TestCase):
                              ['a.npz', 'a.npz', 'b.npz', 'b.npz', 'b.npz'])
             self.assertTrue((Path(folder) / 'merged.json').is_file())
 
+    def test_build_rules(self):
+        from pc_client.red_rl import demos
+        firm = dict(before_px=[707, 680], after_px=[707, 688],
+                    stationary_prediction_px=[707, 777], commanded_rise_mm=35.0)
+        slipped = dict(firm, after_px=[707, 701])
+        self.assertTrue(demos.judge({'auto_evidence': firm})[0])
+        self.assertFalse(demos.judge({'auto_evidence': slipped})[0])
+        self.assertTrue(demos.judge({'auto_evidence': slipped, 'human_success': True})[0])
+        self.assertFalse(demos.judge({'auto_evidence': firm, 'human_success': False})[0])
+        self.assertFalse(demos.judge({'auto_evidence': firm,
+                                      'relocation': {'dropped': True}})[0])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -335,13 +335,23 @@ def short_lift_and_release(session, grasp_pose, state, demo, auto=False, rng=Non
     if auto and auto_evidence['success'] is True:
         route = relocate.plan(grasp_pose, lift, rng)
         if route is not None:
-            image = relocate.execute(
+            result = relocate.execute(
                 session, route,
-                snapshot=lambda: _audit_image(session, demo, 'relocated.jpg'))
+                snapshot=lambda: _audit_image(session, demo, 'relocated.jpg'),
+                held_px=after_px)
             relocation = {key: route[key] for key in (
                 'radius_mm', 'azimuth_deg', 'xy_mm', 'moved_mm',
                 'turn', 'carry', 'release', 'clear')}
-            relocation['image'] = image
+            relocation.update(image=result['image'], dropped=result['dropped'],
+                              carry_px=(list(result['carry_px'])
+                                        if result['carry_px'] is not None else None))
+            if result['dropped']:
+                # Held on the lift, gone by the carry pose: a grasp that does
+                # not survive being carried is not a success.
+                auto_evidence['lift_success'] = auto_evidence['success']
+                auto_evidence['success'] = False
+                auto_evidence['reason'] = 'dropped_while_carrying'
+                print('  automatic camera label: NOT HELD (dropped while carrying)')
             return human_success, auto_evidence, relocation
         print('  no checked route to a new spot; putting it back where it was')
 

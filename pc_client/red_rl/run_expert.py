@@ -69,6 +69,7 @@ def renumber(episodes):
 
 def run_episode(environment, policy=expert):
     observation, info = environment.reset()
+    episode_name = info.get('episode')      # the audit folder, named at reset
     transitions = []
     step_id = 0
     while True:
@@ -82,7 +83,7 @@ def run_episode(environment, policy=expert):
         step_id += 1
         observation = next_observation
         if terminated or truncated:
-            return transitions, info
+            return transitions, dict(info, episode=info.get('episode', episode_name))
 
 
 def sha256(path):

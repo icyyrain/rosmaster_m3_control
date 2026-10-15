@@ -370,8 +370,10 @@ class RedSweetApproachEnv(gym.Env):
         reward = 1.0 if evidence['success'] is True else 0.0
         outcome = {True: 'held', False: 'not_held', None: 'inconclusive'}[
             evidence['success']]
+        if evidence['reason'] == 'dropped_while_carrying':
+            outcome = 'dropped'
         info = dict(grasp_info, outcome=outcome, reason=evidence['reason'],
-                    relocated=relocation is not None)
+                    relocated=relocation is not None and not relocation.get('dropped'))
         self.audit.step(dict(action=action.tolist(), **info))
         self.audit.finish(outcome=outcome, reward=reward, auto_evidence=evidence,
                           relocation=relocation)

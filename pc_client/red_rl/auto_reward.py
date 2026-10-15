@@ -12,9 +12,16 @@ from pathlib import Path
 import reach_candy
 
 
-METHOD = 'short_lift_motion_v1'
+METHOD = 'short_lift_motion_v2'
+KNOWN_METHODS = ('short_lift_motion_v1', METHOD)
 MIN_EXPECTED_MOTION_PX = 45.0
-HELD_MOTION_RATIO = 0.30
+# v1 accepted up to 0.30. An expert grasp at 0.22 was carried off and dropped
+# on the way, seen by the operator; another at 0.20 was a loose hold. Of 14
+# person-confirmed holds, 0.20 would have turned 2 (0.25, 0.29) into "cannot
+# tell" and 0.15 would have turned 3. A hold that slips more than this on a
+# 35 mm lift is not one to carry; the carry check in relocate.py catches what
+# still gets through.
+HELD_MOTION_RATIO = 0.20
 NOT_HELD_MOTION_RATIO = 0.70
 STATIONARY_ERROR_RATIO = 0.30
 MAX_GRIPPER_OFFSET_PX = 150.0
