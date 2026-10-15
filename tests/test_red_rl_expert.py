@@ -82,6 +82,28 @@ class DemoFileTests(unittest.TestCase):
                 np.testing.assert_array_equal(data['policy_actions'],
                                               data['executed_actions'])
 
+    def test_merge_renumbers_and_keeps_every_episode(self):
+        from pc_client.red_rl import demos
+        environment = red_env.FakeRedSweetEnv(seed=2)
+        with tempfile.TemporaryDirectory() as folder:
+            paths = []
+            for name, count in (('a', 2), ('b', 3)):
+                episodes = [run_expert.run_episode(environment)[0] for _ in range(count)]
+                paths.append(run_expert.save_transitions(
+                    Path(folder) / (name + '.npz'), run_expert.renumber(episodes)))
+            summary = demos.merge(paths, Path(folder) / 'merged.npz')
+            self.assertEqual(summary['episodes'], 5)
+            merged = demos.load(Path(folder) / 'merged.npz')
+            split = demos.episodes(merged)
+            self.assertEqual(len(split), 5)
+            self.assertEqual([int(merged['episode_ids'][i[0]]) for i in split],
+                             [0, 1, 2, 3, 4])
+            originals = sum(len(demos.load(p)['rewards']) for p in paths)
+            self.assertEqual(len(merged['rewards']), originals)
+            self.assertEqual([o['file'] for o in summary['origin']],
+                             ['a.npz', 'a.npz', 'b.npz', 'b.npz', 'b.npz'])
+            self.assertTrue((Path(folder) / 'merged.json').is_file())
+
 
 if __name__ == '__main__':
     unittest.main()
