@@ -352,7 +352,8 @@ def short_lift_and_release(session, grasp_pose, state, demo, auto=False, rng=Non
             result = relocate.execute(
                 session, route,
                 snapshot=lambda: _audit_image(session, demo, 'relocated.jpg'),
-                held_px=after_px, held_frame=lift_frame)
+                held_px=after_px, held_frame=lift_frame,
+                audit=lambda frame, name: _audit_frame(demo, frame, name))
             relocation = {key: route[key] for key in (
                 'radius_mm', 'azimuth_deg', 'xy_mm', 'moved_mm',
                 'turn', 'carry', 'release', 'clear')}

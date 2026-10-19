@@ -199,7 +199,7 @@ def carried(session, held_px):
     return math.hypot(pixel[0] - held_px[0], pixel[1] - held_px[1]) <= CARRY_DRIFT_PX, pixel
 
 
-def execute(session, route, snapshot=None, held_px=None, held_frame=None):
+def execute(session, route, snapshot=None, held_px=None, held_frame=None, audit=None):
     """Carry, lower, open, lift clear and go HOME. Joint 5 never moves.
 
     The sweet is checked at the carry pose before it is lowered: an operator
@@ -212,8 +212,8 @@ def execute(session, route, snapshot=None, held_px=None, held_frame=None):
     lowered onto; the jaws open where they are and the arm goes HOME.
 
     `snapshot` is called once the jaws have lifted clear of the released
-    sweet, for an audit photograph. Returns dict(dropped, carry_px, image,
-    carry_check).
+    sweet, for an audit photograph; `audit(frame, name)` saves the carry-check
+    photograph. Returns dict(dropped, carry_px, image, carry_check).
     """
     print('=== relocate ===')
     print('  to radius {radius_mm} mm, azimuth {azimuth_deg} deg, {moved_mm} mm '
@@ -229,6 +229,8 @@ def execute(session, route, snapshot=None, held_px=None, held_frame=None):
         carry_frame = session.streams.colour() if held_frame is not None else None
         if carry_frame is not None:
             still_held, carry_check = hold_check.judge_carry(held_frame, carry_frame)
+            if audit is not None:
+                carry_check['image'] = audit(carry_frame, 'carry.jpg')
             detail = ('{reason}: red {red_lift_px} -> {red_carry_px} px, '
                       'shift {shift_px} px, overlap {overlap}'.format(**carry_check))
         elif held_px is not None:
