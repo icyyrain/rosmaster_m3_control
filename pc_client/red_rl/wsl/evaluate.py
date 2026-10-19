@@ -45,6 +45,7 @@ def main():
     args = parser.parse_args()
 
     agent, checkpoint = common.restore(Path(args.model) / 'checkpoints')
+    common.act(agent, np.zeros(common.STATE_DIM, dtype=np.float32))   # compile first
     env = RemoteEnv(args.host or windows_host(), args.port, timeout=600.0)
     assert env.observation_space.shape == (common.STATE_DIM,)
     assert env.action_space.shape == (common.ACTION_DIM,)

@@ -135,8 +135,21 @@ def main():
         common.save(agent, out / 'checkpoints', 0)
         common.write_json(out / 'config.json', dict(vars(args), init_checkpoint=checkpoint))
 
-    env = RemoteEnv(args.host or windows_host(), args.port, timeout=600.0)
+    # Compile the per-step functions now, with the arm still at HOME. Their
+    # first call otherwise compiles in the middle of the first episode, and
+    # the arm sat still for about 20 s right where the policy takes over.
     rng = jax.random.PRNGKey(args.seed + 1000 * episode_index)
+    probe = np.zeros(common.STATE_DIM, dtype=np.float32)
+    agent.sample_actions({'state': jnp.asarray(probe)}, seed=rng, argmax=False)
+    batch = mixed_batch(online_buffer if len(online_buffer) else demo_buffer,
+                        demo_buffer, args.batch_size)
+    expert = jax.device_put(demo_buffer.sample(args.batch_size))
+    jax.block_until_ready(update_state_sac_with_bc(          # result discarded
+        agent, batch, expert, args.bc_weight, args.bc_log_prob_weight,
+        args.bc_mse_weight))
+    print('compiled the action and update functions', flush=True)
+
+    env = RemoteEnv(args.host or windows_host(), args.port, timeout=600.0)
     metrics_path = out / 'episodes.jsonl'
     failures = 0
     run_steps = 0 if not args.resume else 10 ** 9
