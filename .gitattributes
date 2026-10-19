@@ -3,3 +3,4 @@
 
 # Keep patches reproducible and directly applicable on Linux or Windows.
 *.patch text eol=lf
+*.sh text eol=lf
