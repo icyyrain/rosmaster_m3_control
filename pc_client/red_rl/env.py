@@ -85,6 +85,19 @@ def teacher_args(host='192.168.2.4', port=9090, execute=True):
         squeeze_mm=5.0, keep_holding=False, record=None, execute=execute)
 
 
+def episode_step_limit(options):
+    """Steps before truncation for one episode: options['max_steps'] or MAX_STEPS.
+
+    Training may allow more than evaluation so that exploring does not run
+    out of steps; the observation's step fraction stays normalised by
+    MAX_STEPS either way, so the policy sees the same scale in both.
+    """
+    limit = int((options or {}).get('max_steps', MAX_STEPS))
+    if not 1 <= limit <= 60:
+        raise ValueError('max_steps must be 1-60, got {}'.format(limit))
+    return limit
+
+
 def observation_space():
     return gym.spaces.Box(low=-np.inf, high=np.inf,
                           shape=(len(OBSERVATION_NAMES),), dtype=np.float32)
@@ -213,6 +226,7 @@ class RedSweetApproachEnv(gym.Env):
         self.start_xy = None
         self.pitch_sum = None
         self.steps = 0
+        self.max_steps = MAX_STEPS
         self.lost = 0
         self.state = None
         self.observation = None
@@ -306,6 +320,7 @@ class RedSweetApproachEnv(gym.Env):
         session = self.session
         _fresh_episode(session)
         self.steps = 0
+        self.max_steps = episode_step_limit(options)
         self.lost = 0
         self._go_home()
         try:
@@ -377,7 +392,7 @@ class RedSweetApproachEnv(gym.Env):
             self._retreat()
             self.audit.finish(outcome='target_lost', reward=0.0)
             return observation, 0.0, True, False, dict(info, outcome='target_lost')
-        if self.steps >= MAX_STEPS:
+        if self.steps >= self.max_steps:
             self._retreat()
             self.audit.finish(outcome='step_limit', reward=0.0)
             return observation, 0.0, False, True, dict(info, outcome='step_limit')
@@ -431,6 +446,7 @@ class FakeRedSweetEnv(gym.Env):
         self.pose = None
         self.sweet = None
         self.steps = 0
+        self.max_steps = MAX_STEPS
         self.lost = 0
 
     def _relative(self):
@@ -458,6 +474,7 @@ class FakeRedSweetEnv(gym.Env):
         if seed is not None:
             self.rng = np.random.default_rng(seed)
         self.steps = 0
+        self.max_steps = episode_step_limit(options)
         self.lost = 0
         descent = [int(self.rng.integers(80, 101)), 18, 62,
                    int(self.rng.integers(18, 31)), 90, 90]
@@ -498,7 +515,7 @@ class FakeRedSweetEnv(gym.Env):
         info = {'fake': True, 'clipped': bool(clipped), 'outcome': None}
         if self.lost >= LOST_LIMIT:
             return observation, 0.0, True, False, dict(info, outcome='target_lost')
-        truncated = self.steps >= MAX_STEPS
+        truncated = self.steps >= self.max_steps
         if truncated:
             info['outcome'] = 'step_limit'
         return observation, 0.0, False, truncated, info

@@ -68,6 +68,24 @@ def mixed_batch(online, demos, size):
         online.sample(half), demos.sample(size - half)))
 
 
+def explore(sample, mode, args):
+    """The executed action: the policy's mode with a measured amount of its noise.
+
+    Moves: mode + scale x (sample - mode). Close: the sample only near the
+    decision (mode within the band below 0), so it can learn when closing
+    pays without closing at random in mid-air; elsewhere the mode.
+    """
+    action = np.array(mode, dtype=np.float32)
+    action[:common.CLOSE] = np.clip(
+        mode[:common.CLOSE] + args.move_noise_scale * (sample[:common.CLOSE]
+                                                       - mode[:common.CLOSE]),
+        -1.0, 1.0)
+    near = -args.close_explore_band < mode[common.CLOSE] <= 0.0
+    if args.close_noise or near:
+        action[common.CLOSE] = sample[common.CLOSE]
+    return action
+
+
 def scalars(info):
     flat = {}
     for group, values in info.items():
@@ -98,9 +116,19 @@ def main():
                              'so a critic that has only seen demonstrations does not '
                              'drag the BC actor off course in the first episode.')
     parser.add_argument('--close-noise', action='store_true',
-                        help='Sample the close value too. Off by default: the first S2 '
-                             'run closed in mid-air on 14.5%% of steps above 5 mm at one '
-                             'point, while the mode never did there. Moves still explore.')
+                        help='Sample the close value everywhere, as the first S2 run did. '
+                             'It closed in mid-air on 14.5%% of steps above 5 mm at one '
+                             'point, while the mode never did there.')
+    parser.add_argument('--move-noise-scale', type=float, default=0.3,
+                        help='Scale of the sampled deviation from the mode on the three '
+                             'moves. 1.0 is plain SAC; on the arm that wandered 3-4 mm a '
+                             'step and ran out of steps. 0.3 is about 1 mm.')
+    parser.add_argument('--close-explore-band', type=float, default=0.3,
+                        help='Sample the close only where the mode lies within this of 0, '
+                             'i.e. where the policy is already close to closing; elsewhere '
+                             'use the mode. 0 never explores the close.')
+    parser.add_argument('--max-steps', type=int, default=30,
+                        help='Episode step limit during training (evaluation keeps 20).')
     parser.add_argument('--max-failures', type=int, default=6,
                         help='Stop after this many unrewarded episodes in a row.')
     parser.add_argument('--host', default=None)
@@ -160,7 +188,7 @@ def main():
     try:
         while episode_index < args.episodes:
             try:
-                observation, info = env.reset()
+                observation, info = env.reset(options={'max_steps': args.max_steps})
             except RuntimeError as error:
                 print('stopping, reset failed: {}'.format(error))
                 break
@@ -168,12 +196,11 @@ def main():
             losses = []
             while True:
                 rng, key = jax.random.split(rng)
-                action = np.array(agent.sample_actions(          # a writable copy
+                sample = np.array(agent.sample_actions(
                     {'state': jnp.asarray(observation)}, seed=key, argmax=False),
                     dtype=np.float32)
-                if not args.close_noise:
-                    action[common.CLOSE] = common.act(
-                        agent, np.asarray(observation, dtype=np.float32))[common.CLOSE]
+                mode = common.act(agent, np.asarray(observation, dtype=np.float32))
+                action = explore(sample, mode, args)
                 next_observation, reward, terminated, truncated, info = env.step(action)
                 transition = Transition(
                     observation=observation, policy_action=action, executed_action=action,

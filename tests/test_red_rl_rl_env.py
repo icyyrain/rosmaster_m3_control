@@ -239,6 +239,29 @@ class EnvTests(unittest.TestCase):
             self.assertFalse(result[2])
             self.assertEqual(result[4]['outcome'], 'step_limit')
 
+    def test_training_may_allow_more_steps_than_evaluation(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            environment, session = self.make_env(folder)
+            descent_pose = [90, 18, 62, 24, 90, 90]
+
+            def descend(sess, state):
+                sess.pose = list(descent_pose)
+                sess.last_px = (705.0, 675.0)
+                return {'cx': 705.0, 'cy': 675.0, 'area': 2500, 'height': 50.0}
+            with mock.patch.object(red_env.pick, 'preflight', return_value=True), \
+                    mock.patch.object(red_env.collect, 'align_teacher',
+                                      return_value={'cx': 700, 'cy': 670}), \
+                    mock.patch.object(red_env.pick, 'descend', side_effect=descend):
+                environment.reset(options={'max_steps': 30})
+            for step in range(1, 31):
+                observation, _, _, truncated, _ = environment.step([0, 0, 0, -1])
+                self.assertEqual(truncated, step == 30)
+            # the step fraction keeps its evaluation scale
+            self.assertAlmostEqual(observation[9], 30 / red_env.MAX_STEPS, places=5)
+        with self.assertRaises(ValueError):
+            red_env.episode_step_limit({'max_steps': 0})
+
     def test_close_rewards_the_camera_verdict(self):
         import tempfile
         for success, reward in ((True, 1.0), (None, 0.0), (False, 0.0)):
