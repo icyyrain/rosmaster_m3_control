@@ -51,6 +51,10 @@ LOST_LIMIT = 2
 # Inward has the whole frame to spare.
 START_OFFSET_MM = dict(radial=(-12.0, 6.0), lateral=(-12.0, 12.0), up=(0.0, 10.0))
 START_ATTEMPTS = 3
+# A borderline check can flip between looks: S2 stopped on a colour margin of
+# +3 against a pass mark of >3, the sweet lying logo-up with little red showing.
+# Looking again costs a second; a scene that keeps failing still stops.
+PREFLIGHT_ATTEMPTS = 3
 MM_PER_PX = 0.17                 # near the table: about range / focal length
 BOX_HALF_WIDTH_MM = 30.0         # horizontal distance allowed from the start
 BELOW_GRASP_LIMIT_MM = 3.0       # lowest point: this far under the grasp height
@@ -299,8 +303,15 @@ class RedSweetApproachEnv(gym.Env):
         self.lost = 0
         self._go_home()
         try:
-            if not pick.preflight(session):
-                raise RuntimeError('Preflight failed; the scene needs a person')
+            for attempt in range(1, PREFLIGHT_ATTEMPTS + 1):
+                if pick.preflight(session):
+                    break
+                if attempt == PREFLIGHT_ATTEMPTS:
+                    raise RuntimeError('Preflight failed; the scene needs a person')
+                print('  preflight failed, looking again ({}/{})'.format(
+                    attempt, PREFLIGHT_ATTEMPTS))
+                _fresh_episode(session)
+                time.sleep(1.0)
             state = collect.align_teacher(session)
             if state is None:
                 raise RuntimeError('Rule alignment failed')

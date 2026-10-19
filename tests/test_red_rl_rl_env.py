@@ -160,10 +160,28 @@ class EnvTests(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as folder:
             environment, session = self.make_env(folder)
-            with mock.patch.object(red_env.pick, 'preflight', return_value=False):
+            with mock.patch.object(red_env.pick, 'preflight', return_value=False) as check,                     mock.patch.object(red_env.time, 'sleep'):
                 with self.assertRaisesRegex(RuntimeError, 'Preflight'):
                     environment.reset()
+            self.assertEqual(check.call_count, red_env.PREFLIGHT_ATTEMPTS)
             self.assertEqual(session.sent[-1], list(red_env.arm_control.HOME_POSE))
+
+    def test_a_borderline_preflight_is_looked_at_again(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            environment, session = self.make_env(folder)
+            results = iter([False, True])
+            descent_pose = [90, 18, 62, 24, 90, 90]
+
+            def descend(sess, state):
+                sess.pose = list(descent_pose)
+                sess.last_px = (705.0, 675.0)
+                return {'cx': 705.0, 'cy': 675.0, 'area': 2500, 'height': 50.0}
+            with mock.patch.object(red_env.pick, 'preflight',
+                                   side_effect=lambda s: next(results)),                     mock.patch.object(red_env.time, 'sleep'),                     mock.patch.object(red_env.collect, 'align_teacher',
+                                      return_value={'cx': 700, 'cy': 670}),                     mock.patch.object(red_env.pick, 'descend', side_effect=descend):
+                observation, _ = environment.reset()
+            self.assertEqual(observation[2], 1.0)
 
     def test_box_clips_instead_of_diving(self):
         import tempfile
