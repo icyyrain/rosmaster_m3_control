@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from pc_client.red_rl import auto_reward
+from pc_client.red_rl import hold_check
 from pc_client.red_rl import run_expert
 
 FIELDS = ('observations', 'policy_actions', 'executed_actions', 'next_observations',
@@ -94,12 +95,14 @@ def judge(audit_meta):
     if (audit_meta.get('relocation') or {}).get('dropped'):
         return False, 'dropped while carrying'
     turn = evidence.get('turn_check') or {}
-    if turn.get('success') is not None:
-        # The base turn decided at collection time; its thresholds are applied
-        # there, to the photographs, so the stored verdict stands.
-        if turn['success'] is False and audit_meta.get('human_success') is not True:
-            return False, 'camera: not held ({})'.format(turn['reason'])
-        return True, turn['reason']
+    if 'red_before_px' in turn:
+        # Re-judged from the recorded red counts and overlap with today's
+        # thresholds, as the lift is below.
+        success, reason = hold_check.decide_turn(turn)
+        if success is not None:
+            if success is False and audit_meta.get('human_success') is not True:
+                return False, 'camera now: not held ({})'.format(reason)
+            return True, reason
     if None in (evidence.get('before_px'), evidence.get('after_px'),
                 evidence.get('stationary_prediction_px')):
         return audit_meta.get('human_success') is True, 'no lift evidence'

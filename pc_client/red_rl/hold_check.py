@@ -9,11 +9,16 @@ scored INCONCLUSIVE where the photographs show a firm grasp.
 
 This check moves sideways instead. At the lift pose the base turns
 TURN_DEG: a sweet in the jaws turns with the camera and its red stays where
-it was in the image; one left on the table shifts across the image by about
-the camera's motion (roughly 90 px for 4 degrees near the table), and
-sideways it stays in the frame. The comparison is between the red masks near
-the jaws before and after the turn, best-overlap shift against no shift, so
-a sliver of red is enough and no centroid is needed.
+it was in the image; one left on the table shifts across it. The decision is
+how much of the red near the jaws is still in place after the turn (overlap
+at zero shift), so a sliver of red is enough and no centroid is needed.
+
+v1 decided on the best-overlap shift instead. On the arm (2026-10-19) the
+nine sweets held at the turn kept 0.85-0.99 of their red in place, and four
+deliberate misses 0.015-0.093; the misses shifted only 56-90 px, and on one
+the sweet sat half behind a jaw at the frame edge, so what showed of it
+changed shape across the turn and no shift matched (v1: cannot tell). The
+best shift is still recorded.
 
 The same mask comparison checks the carry: a held sweet is rigid with the
 camera, so at the carry pose its red is where it was after the lift.
@@ -25,15 +30,15 @@ import numpy as np
 import reach_candy
 from pc_client.red_rl import auto_reward
 
-METHOD = 'base_turn_v1'
+METHOD = 'base_turn_v2'
 
 TURN_DEG = 4
 TURN_MS = 500
 TURN_SETTLE_S = 1.5
 MIN_RED_PX = 120                 # too little red near the jaws to compare
-HELD_SHIFT_PX = 20               # the red stayed put
-MOVED_SHIFT_PX = 45              # the red moved like the table
-MIN_OVERLAP = 0.35               # the best shift must explain the red this well
+STAYED_OVERLAP = 0.6             # this much of the red in place: it turned with us
+LEFT_OVERLAP = 0.3               # this little: it stayed with the table
+MIN_OVERLAP = 0.35               # carry: the best shift must explain the red this well
 MAX_SHIFT_PX = 160
 CARRY_SHIFT_PX = 40              # a held sweet may swing this much while carried
 
@@ -86,25 +91,30 @@ def judge_turn(before_bgr, after_bgr):
                     red_before_px=int(before.sum()), red_after_px=int(after.sum()),
                     shift_px=None, overlap=None, overlap_at_zero=None,
                     success=None, reason=None)
-    if before.sum() < MIN_RED_PX:
-        # A held sweet can hide behind the jaws; leave it to the lift check.
-        evidence['reason'] = 'no_red_near_the_jaws_after_the_lift'
-        return evidence
-    if after.sum() < MIN_RED_PX:
-        evidence['reason'] = 'red_left_the_view_on_the_turn'
-        evidence['success'] = False
-        return evidence
-    dx, overlap, zero = horizontal_shift(before, after)
-    evidence.update(shift_px=dx, overlap=round(overlap, 3), overlap_at_zero=round(zero, 3))
-    if overlap < MIN_OVERLAP:
-        evidence['reason'] = 'red_does_not_match_across_the_turn'
-    elif abs(dx) <= HELD_SHIFT_PX:
-        evidence.update(success=True, reason='red_turned_with_the_camera')
-    elif abs(dx) >= MOVED_SHIFT_PX:
-        evidence.update(success=False, reason='red_stayed_with_the_table')
-    else:
-        evidence['reason'] = 'shift_between_held_and_table'
+    if before.sum() >= MIN_RED_PX and after.sum() >= MIN_RED_PX:
+        dx, overlap, zero = horizontal_shift(before, after)
+        evidence.update(shift_px=dx, overlap=round(overlap, 3),
+                        overlap_at_zero=round(zero, 3))
+    success, reason = decide_turn(evidence)
+    evidence.update(success=success, reason=reason)
     return evidence
+
+
+def decide_turn(evidence):
+    """(success, reason) from the recorded numbers, so old evidence can be re-judged."""
+    if evidence['red_before_px'] < MIN_RED_PX:
+        # A held sweet can hide behind the jaws; leave it to the lift check.
+        return None, 'no_red_near_the_jaws_after_the_lift'
+    if evidence['red_after_px'] < MIN_RED_PX:
+        return False, 'red_left_the_view_on_the_turn'
+    zero = evidence.get('overlap_at_zero')
+    if zero is None:
+        return None, 'no_overlap_recorded'
+    if zero >= STAYED_OVERLAP:
+        return True, 'red_turned_with_the_camera'
+    if zero <= LEFT_OVERLAP:
+        return False, 'red_stayed_with_the_table'
+    return None, 'red_partly_in_place'
 
 
 def judge_carry(lift_bgr, carry_bgr):

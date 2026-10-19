@@ -55,10 +55,42 @@ class TurnJudgeTests(unittest.TestCase):
         evidence = hold_check.judge_turn(frame(HELD), EMPTY)
         self.assertIs(evidence['success'], False)
 
-    def test_a_shift_between_held_and_table_cannot_tell(self):
-        moved = (HELD[0] + 32,) + HELD[1:]
+    def test_red_partly_in_place_cannot_tell(self):
+        moved = (HELD[0] + 36,) + HELD[1:]
         evidence = hold_check.judge_turn(frame(HELD), frame(moved))
+        self.assertGreater(evidence['overlap_at_zero'], hold_check.LEFT_OVERLAP)
+        self.assertLess(evidence['overlap_at_zero'], hold_check.STAYED_OVERLAP)
         self.assertIsNone(evidence['success'])
+
+    def test_a_table_sweet_half_behind_a_jaw_is_not_held(self):
+        # The fourth deliberate miss: the visible red changes shape as the
+        # sweet slides from behind the right jaw to between the jaws, so no
+        # shift matches it, but none of it stayed in place.
+        def with_jaws(image):
+            for x in (GX - 95, GX + 35):
+                cv2.rectangle(image, (x, GY - 50), (x + 60, 719), (25, 25, 25), -1)
+            return image
+        sweet = (GX + 70, 712, 40)
+        before = with_jaws(frame(sweet))
+        after = with_jaws(frame((sweet[0] - 75,) + sweet[1:]))
+        evidence = hold_check.judge_turn(before, after)
+        self.assertLess(evidence['overlap_at_zero'], hold_check.LEFT_OVERLAP)
+        self.assertIs(evidence['success'], False)
+
+    def test_recorded_arm_trials_rejudge_to_the_operator_labels(self):
+        # (red before, red after, overlap at zero, held at the turn) from
+        # 2026-10-19: nine sweets held at the turn, four deliberate misses.
+        trials = [(1399, 1512, 0.873, True), (2377, 2606, 0.959, True),
+                  (1139, 968, 0.853, True), (907, 817, 0.95, True),
+                  (2546, 2595, 0.941, True), (1280, 1112, 0.99, True),
+                  (2259, 2137, 0.933, True), (1901, 1782, 0.957, True),
+                  (1513, 1519, 0.886, True), (2671, 3048, 0.091, False),
+                  (3221, 2464, 0.093, False), (4004, 3805, 0.064, False),
+                  (260, 701, 0.015, False)]
+        for before, after, zero, held in trials:
+            success, _ = hold_check.decide_turn(dict(
+                red_before_px=before, red_after_px=after, overlap_at_zero=zero))
+            self.assertIs(success, held)
 
     def test_red_far_from_the_jaws_is_ignored(self):
         far = (GX + hold_check.ROI_HALF_WIDTH_PX + 60, 200, 40)
@@ -102,11 +134,12 @@ class CombineTests(unittest.TestCase):
         self.assertIs(evidence['success'], False)
         self.assertEqual(evidence['decided_by'], 'lift')
 
-    def test_demos_keep_the_turn_verdict(self):
-        meta = dict(auto_evidence=hold_check.combine(
-            dict(self.lift), dict(success=True, reason='red_turned_with_the_camera')))
+    def test_demos_rejudge_the_turn(self):
+        held = hold_check.judge_turn(frame(HELD), frame(HELD))
+        meta = dict(auto_evidence=hold_check.combine(dict(self.lift), held))
         self.assertEqual(demos.judge(meta), (True, 'red_turned_with_the_camera'))
-        meta['auto_evidence']['turn_check']['success'] = False
+        # recorded under looser thresholds, judged by today's
+        meta['auto_evidence']['turn_check'].update(success=True, overlap_at_zero=0.1)
         self.assertFalse(demos.judge(meta)[0])
         meta['human_success'] = True
         self.assertTrue(demos.judge(meta)[0])
