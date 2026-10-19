@@ -51,6 +51,12 @@ LOST_LIMIT = 2
 # Inward has the whole frame to spare.
 START_OFFSET_MM = dict(radial=(-12.0, 6.0), lateral=(-12.0, 12.0), up=(0.0, 10.0))
 START_ATTEMPTS = 3
+# Where the sweet may be, as the gripper's distance from the base at the end
+# of the rule descent (it predicts the grasp within about 4 mm, sd 3.6 over 107
+# episodes). 190-245 mm kept 83 of 84 held episodes and would have stopped 5
+# of 23 failures, among them three in the first S2 run with the sweet rolled
+# out to 247-274 mm, further than any demonstration reached.
+REACH_RADIUS_MM = (190.0, 245.0)
 # A borderline check can flip between looks: S2 stopped on a colour margin of
 # +3 against a pass mark of >3, the sweet lying logo-up with little red showing.
 # Looking again costs a second; a scene that keeps failing still stops.
@@ -321,6 +327,12 @@ class RedSweetApproachEnv(gym.Env):
             if state.get('height') is None:
                 raise RuntimeError('No depth height at the end of the descent; '
                                    'cannot calibrate forward kinematics')
+            reach = math.hypot(*kinematics.gripper_mm(session.pose)[:2])
+            if not REACH_RADIUS_MM[0] <= reach <= REACH_RADIUS_MM[1]:
+                raise RuntimeError(
+                    'The sweet is {:.0f} mm from the base; episodes are only run '
+                    'between {:.0f} and {:.0f} mm. Move it nearer the middle of the '
+                    'view.'.format(reach, *REACH_RADIUS_MM))
             self.bias_mm = state['height'] - kinematics.gripper_height_mm(session.pose)
             self.pitch_sum = sum(session.pose[1:4])
             request, attempts = self._start_offset()

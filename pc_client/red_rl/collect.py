@@ -356,7 +356,8 @@ def short_lift_and_release(session, grasp_pose, state, demo, auto=False, rng=Non
         print('  no checked route to a new spot; putting it back where it was')
 
     print('=== fixed low release ===')
-    release, clearance = pick.low_release_pose(grasp_pose, clearance_mm=10.0)
+    release, clearance = pick.low_release_pose(
+        grasp_pose, clearance_mm=relocate.RELEASE_CLEARANCE_MM)
     print('  lower to {:.1f} mm above grasp height'.format(clearance))
     session.send(release, 1100, 1.8)
     opened = list(session.pose)

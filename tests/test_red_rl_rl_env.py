@@ -121,6 +121,24 @@ class EnvTests(unittest.TestCase):
             json.dumps(_to_wire(info))                  # survives the wire
             self.assertEqual(_from_wire(json.loads(json.dumps(_to_wire(info)))), info)
 
+    def test_a_sweet_out_of_reach_stops_before_the_policy(self):
+        import tempfile
+        for pose in ([90, 18, 62, 45, 90, 90], [90, 30, 50, 10, 90, 90]):  # 288, 185 mm
+            with tempfile.TemporaryDirectory() as folder:
+                environment, session = self.make_env(folder)
+
+                def descend(sess, state, pose=pose):
+                    sess.pose = list(pose)
+                    sess.last_px = (705.0, 675.0)
+                    return {'cx': 705.0, 'cy': 675.0, 'area': 2500, 'height': 50.0}
+                with mock.patch.object(red_env.pick, 'preflight', return_value=True), \
+                        mock.patch.object(red_env.collect, 'align_teacher',
+                                          return_value={'cx': 700, 'cy': 670}), \
+                        mock.patch.object(red_env.pick, 'descend', side_effect=descend):
+                    with self.assertRaisesRegex(RuntimeError, 'from the base'):
+                        environment.reset()
+                self.assertEqual(session.sent[-1], list(red_env.arm_control.HOME_POSE))
+
     def test_lost_start_offset_is_retried_from_the_descent_pose(self):
         import tempfile
         found = {'cx': 700.0, 'cy': 660.0, 'area': 3000, 'height': 30.0}

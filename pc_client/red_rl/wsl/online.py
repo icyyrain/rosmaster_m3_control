@@ -97,6 +97,10 @@ def main():
                         help='Arm steps at the start of the run with critic-only updates, '
                              'so a critic that has only seen demonstrations does not '
                              'drag the BC actor off course in the first episode.')
+    parser.add_argument('--close-noise', action='store_true',
+                        help='Sample the close value too. Off by default: the first S2 '
+                             'run closed in mid-air on 14.5%% of steps above 5 mm at one '
+                             'point, while the mode never did there. Moves still explore.')
     parser.add_argument('--max-failures', type=int, default=6,
                         help='Stop after this many unrewarded episodes in a row.')
     parser.add_argument('--host', default=None)
@@ -167,6 +171,9 @@ def main():
                 action = np.asarray(agent.sample_actions(
                     {'state': jnp.asarray(observation)}, seed=key, argmax=False),
                     dtype=np.float32)
+                if not args.close_noise:
+                    action[common.CLOSE] = common.act(
+                        agent, np.asarray(observation, dtype=np.float32))[common.CLOSE]
                 next_observation, reward, terminated, truncated, info = env.step(action)
                 transition = Transition(
                     observation=observation, policy_action=action, executed_action=action,

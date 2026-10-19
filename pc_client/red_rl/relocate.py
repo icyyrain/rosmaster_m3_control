@@ -27,7 +27,10 @@ MIN_MOVE_MM = 30.0               # do not put it back where it was picked up
 
 CARRY_CLEARANCE_MM = 35.0        # the short lift's height above the grasp
 MIN_TRAVEL_CLEARANCE_MM = 20.0   # lowest the sweet may be while moving sideways
-RELEASE_CLEARANCE_MM = pick.PLACE_RELEASE_CLEARANCE_MM
+# Let go 5 mm above the grasp height, not pick_and_place's 10: in the first S2
+# run sweets released from 10 mm rolled on, and three episodes later found
+# one 247-274 mm from the base, beyond every demonstration.
+RELEASE_CLEARANCE_MM = 5.0
 MAX_LOWERING_DRIFT_MM = 6.0      # sideways motion allowed while lowering
 
 RADIUS_TOLERANCE_MM = 2.0
