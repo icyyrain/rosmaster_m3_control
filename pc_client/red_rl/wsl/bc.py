@@ -24,14 +24,15 @@ from isaaclab_hil_serl.learning import pretrain_state_sac_actor_with_bc
 import common
 
 
-def train(observations, actions, updates, batch_size, seed, log_every=1000):
+def train(observations, actions, updates, batch_size, seed, log_prob_weight=0.0,
+          log_every=1000):
     agent = common.make_agent(seed)
     rng = np.random.default_rng(seed)
     for update in range(1, updates + 1):
         index = rng.integers(0, len(observations), batch_size)
         batch = {'observations': {'state': jax.device_put(observations[index])},
                  'actions': jax.device_put(actions[index])}
-        agent, info = pretrain_state_sac_actor_with_bc(agent, batch, 0.0, 1.0)
+        agent, info = pretrain_state_sac_actor_with_bc(agent, batch, log_prob_weight, 1.0)
         if update % log_every == 0 or update == updates:
             print('  update {:>5}: bc mse {:.4f}'.format(update, float(info['actor']['bc_mse'])),
                   flush=True)
@@ -65,6 +66,9 @@ def main():
     parser.add_argument('--holdout', type=int, default=5,
                         help='Whole episodes held out for the check.')
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--log-prob-weight', type=float, default=0.0,
+                        help='Also fit the action spread (0 = mean only, as M3). '
+                             'SAC samples that spread to explore, so S2 wants it fitted.')
     args = parser.parse_args()
 
     out = Path(args.out or 'models/red_sweet_rl/bc-' + time.strftime('%Y%m%d-%H%M%S'))
@@ -77,7 +81,7 @@ def main():
     print('check: training on {} episodes, holding out {}'.format(
         len(ids) - len(held), sorted(held.tolist())))
     check_agent = train(observations[train_rows], actions[train_rows],
-                        args.updates, args.batch_size, args.seed)
+                        args.updates, args.batch_size, args.seed, args.log_prob_weight)
     check = dict(holdout_episodes=sorted(held.tolist()),
                  train=score(check_agent, observations[train_rows], actions[train_rows]),
                  holdout=score(check_agent, observations[~train_rows], actions[~train_rows]))
@@ -87,13 +91,14 @@ def main():
               check['holdout']['early_close_rate']))
 
     print('final: training on all {} episodes'.format(len(ids)))
-    agent = train(observations, actions, args.updates, args.batch_size, args.seed)
+    agent = train(observations, actions, args.updates, args.batch_size, args.seed,
+                  args.log_prob_weight)
     common.save(agent, out / 'checkpoints', args.updates)
     final = score(agent, observations, actions)
     common.write_json(out / 'summary.json', dict(
         stage='M3 behaviour cloning', demos=str(args.demos),
         demos_sha256=common.sha256(args.demos), updates=args.updates,
-        batch_size=args.batch_size, seed=args.seed, loss='bc mse (log-prob weight 0)',
+        batch_size=args.batch_size, seed=args.seed, loss='bc mse + {} x log-prob'.format(args.log_prob_weight),
         agent=common.AGENT_KWARGS, check=check, final_train=final))
     print('saved {}'.format(out))
 
