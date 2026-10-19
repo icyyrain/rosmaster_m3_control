@@ -93,6 +93,13 @@ def judge(audit_meta):
     evidence = audit_meta.get('auto_evidence') or {}
     if (audit_meta.get('relocation') or {}).get('dropped'):
         return False, 'dropped while carrying'
+    turn = evidence.get('turn_check') or {}
+    if turn.get('success') is not None:
+        # The base turn decided at collection time; its thresholds are applied
+        # there, to the photographs, so the stored verdict stands.
+        if turn['success'] is False and audit_meta.get('human_success') is not True:
+            return False, 'camera: not held ({})'.format(turn['reason'])
+        return True, turn['reason']
     if None in (evidence.get('before_px'), evidence.get('after_px'),
                 evidence.get('stationary_prediction_px')):
         return audit_meta.get('human_success') is True, 'no lift evidence'

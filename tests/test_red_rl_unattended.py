@@ -157,6 +157,9 @@ class UnattendedCollectorTests(unittest.TestCase):
         held = {'success': True, 'reason': 'target_stayed_near_gripper_pixel'}
         with mock.patch.object(collect, 'assess_short_lift', return_value=dict(held)), \
                 mock.patch.object(collect, '_audit_image', return_value=None), \
+                mock.patch.object(collect.hold_check, 'turn_check', return_value=(
+                    dict(success=None, reason='no_red'), None, None)), \
+                mock.patch.object(collect, '_audit_frame', return_value=None), \
                 mock.patch.object(collect.relocate, 'execute', return_value=dict(
                     dropped=False, carry_px=(709.0, 682.0),
                     image='images/relocated.jpg')) as execute, \
@@ -177,6 +180,9 @@ class UnattendedCollectorTests(unittest.TestCase):
         held = {'success': True, 'reason': 'target_stayed_near_gripper_pixel'}
         with mock.patch.object(collect, 'assess_short_lift', return_value=dict(held)), \
                 mock.patch.object(collect, '_audit_image', return_value=None), \
+                mock.patch.object(collect.hold_check, 'turn_check', return_value=(
+                    dict(success=None, reason='no_red'), None, None)), \
+                mock.patch.object(collect, '_audit_frame', return_value=None), \
                 mock.patch.object(collect.relocate, 'execute', return_value=dict(
                     dropped=True, carry_px=None, image=None)):
             _, evidence, relocation = collect.short_lift_and_release(
@@ -192,6 +198,9 @@ class UnattendedCollectorTests(unittest.TestCase):
         unsure = {'success': None, 'reason': 'ambiguous_target_motion'}
         with mock.patch.object(collect, 'assess_short_lift', return_value=dict(unsure)), \
                 mock.patch.object(collect, '_audit_image', return_value=None), \
+                mock.patch.object(collect.hold_check, 'turn_check', return_value=(
+                    dict(success=None, reason='no_red'), None, None)), \
+                mock.patch.object(collect, '_audit_frame', return_value=None), \
                 mock.patch.object(collect.relocate, 'execute') as execute, \
                 mock.patch('builtins.input', side_effect=AssertionError('asked')):
             _, evidence, relocation = collect.short_lift_and_release(

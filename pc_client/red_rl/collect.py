@@ -21,7 +21,7 @@ import gripper_state
 import kinematics
 import reach_candy
 import pick_and_place as pick
-from pc_client.red_rl import relocate
+from pc_client.red_rl import hold_check, relocate
 from pc_client.red_rl.dataset import (AUTO_LABEL_SOURCE, CURRENT_GRASP_RULE,
                                       HUMAN_LABEL_SOURCE, EpisodeRecorder, features)
 from pc_client.red_rl.auto_reward import assess_short_lift
@@ -184,8 +184,12 @@ def ask_success():
 
 def _audit_image(session, demo, name):
     """Best-effort still frame; failure must not strand an arm holding an object."""
+    return _audit_frame(demo, session.streams.colour(), name)
+
+
+def _audit_frame(demo, frame, name):
     try:
-        return demo._image(session.streams.colour(), name)
+        return demo._image(frame, name)
     except (OSError, ValueError) as error:
         print('  audit snapshot unavailable: {}'.format(error))
         return None
@@ -320,9 +324,19 @@ def short_lift_and_release(session, grasp_pose, state, demo, auto=False, rng=Non
             fresh['cx'], fresh['cy'], fresh['area']))
     after_image = _audit_image(session, demo, 'short-lift.jpg')
     after_px = (fresh['cx'], fresh['cy']) if fresh is not None else None
-    auto_evidence = assess_short_lift(previous, after_px, predicted, actual_rise)
-    auto_evidence['image_before'] = before_image
-    auto_evidence['image_after'] = after_image
+    lift_evidence = assess_short_lift(previous, after_px, predicted, actual_rise)
+    lift_evidence['image_before'] = before_image
+    lift_evidence['image_after'] = after_image
+    print('  short lift: {} ({})'.format(
+        {True: 'held', False: 'not held', None: 'cannot tell'}[lift_evidence['success']],
+        lift_evidence['reason']))
+    turn, lift_frame, turned_frame = hold_check.turn_check(session)
+    turn['image'] = _audit_frame(demo, turned_frame, 'base-turn.jpg')
+    print('  base turn {} deg: {} ({}; red shift {} px, overlap {})'.format(
+        hold_check.TURN_DEG,
+        {True: 'held', False: 'not held', None: 'cannot tell'}[turn['success']],
+        turn['reason'], turn.get('shift_px'), turn.get('overlap')))
+    auto_evidence = hold_check.combine(lift_evidence, turn)
     human_success = None if auto else ask_success()
     auto_label = {True: 'HELD', False: 'NOT HELD', None: 'INCONCLUSIVE'}[
         auto_evidence['success']]
@@ -338,13 +352,14 @@ def short_lift_and_release(session, grasp_pose, state, demo, auto=False, rng=Non
             result = relocate.execute(
                 session, route,
                 snapshot=lambda: _audit_image(session, demo, 'relocated.jpg'),
-                held_px=after_px)
+                held_px=after_px, held_frame=lift_frame)
             relocation = {key: route[key] for key in (
                 'radius_mm', 'azimuth_deg', 'xy_mm', 'moved_mm',
                 'turn', 'carry', 'release', 'clear')}
             relocation.update(image=result['image'], dropped=result['dropped'],
                               carry_px=(list(result['carry_px'])
-                                        if result['carry_px'] is not None else None))
+                                        if result['carry_px'] is not None else None),
+                              carry_check=result.get('carry_check'))
             if result['dropped']:
                 # Held on the lift, gone by the carry pose: a grasp that does
                 # not survive being carried is not a success.

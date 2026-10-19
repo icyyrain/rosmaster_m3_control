@@ -94,7 +94,11 @@ class ShortLiftRewardTests(unittest.TestCase):
         self.assertIs(human, True)
         self.assertIs(automatic['success'], True)
         self.assertIsNone(relocation)       # attended runs put it back in place
-        self.assertEqual(len(session.commands), 4)
+        # lift, base turn and back, release, open, HOME
+        self.assertEqual(len(session.commands), 6)
+        self.assertEqual(session.commands[1][1:], lift[0][1:])
+        self.assertEqual(session.commands[2], lift[0])
+        self.assertEqual(automatic['decided_by'], 'lift')      # no red in a blank frame
         self.assertEqual(session.commands[-1], list(arm_control.HOME_POSE))
 
 

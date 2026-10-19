@@ -17,6 +17,7 @@ import arm_control
 import gripper_state
 import kinematics
 import pick_and_place as pick
+from pc_client.red_rl import hold_check
 
 # Gripper-origin positions, in base_link polar coordinates, of the 17
 # human-confirmed grasps up to 2026-10-14: radius 185-242 mm, azimuth -17.2 to
@@ -198,40 +199,56 @@ def carried(session, held_px):
     return math.hypot(pixel[0] - held_px[0], pixel[1] - held_px[1]) <= CARRY_DRIFT_PX, pixel
 
 
-def execute(session, route, snapshot=None, held_px=None):
+def execute(session, route, snapshot=None, held_px=None, held_frame=None):
     """Carry, lower, open, lift clear and go HOME. Joint 5 never moves.
 
-    With `held_px`, the pixel of the sweet after the short lift, the sweet is
-    checked at the carry pose before it is lowered: an operator saw one grasp
-    that passed the lift check fall out on the way. A dropped sweet is not
+    The sweet is checked at the carry pose before it is lowered: an operator
+    saw one grasp that passed the lift check fall out on the way. With
+    `held_frame`, the photograph at the short lift, the red near the jaws is
+    compared (hold_check.judge_carry); otherwise, with `held_px`, the pixel of
+    the sweet after the short lift, its tracked centroid. The centroid alone
+    called two firm grasps dropped when the sweet sat twist-up, mostly wrapper
+    and a sliver of red clipped by the frame edge. A dropped sweet is not
     lowered onto; the jaws open where they are and the arm goes HOME.
 
     `snapshot` is called once the jaws have lifted clear of the released
-    sweet, for an audit photograph. Returns dict(dropped, carry_px, image).
+    sweet, for an audit photograph. Returns dict(dropped, carry_px, image,
+    carry_check).
     """
     print('=== relocate ===')
     print('  to radius {radius_mm} mm, azimuth {azimuth_deg} deg, {moved_mm} mm '
           'from where it was picked up'.format(**route))
-    carry_px = None
+    carry_px, carry_check = None, None
     for name in ('turn', 'carry', 'release'):
         target = route[name]
         duration = move_ms(session.pose, target)
         print('  {:<8} {}'.format(name, target[:4]))
         session.send(target, duration, duration / 1000.0 + 0.8)
-        if name == 'carry' and held_px is not None:
+        if name != 'carry':
+            continue
+        carry_frame = session.streams.colour() if held_frame is not None else None
+        if carry_frame is not None:
+            still_held, carry_check = hold_check.judge_carry(held_frame, carry_frame)
+            detail = ('{reason}: red {red_lift_px} -> {red_carry_px} px, '
+                      'shift {shift_px} px, overlap {overlap}'.format(**carry_check))
+        elif held_px is not None:
             still_held, carry_px = carried(session, held_px)
-            if not still_held:
-                print('  the sweet is no longer in the jaws (seen at {}, held at '
-                      '{:.0f},{:.0f}); not putting anything down'.format(
-                          'nowhere' if carry_px is None else
-                          '{:.0f},{:.0f}'.format(*carry_px), *held_px))
-                opened = list(session.pose)
-                opened[5] = gripper_state.OPEN_CMD
-                session.send(opened, 1200, 2.0)
-                session.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS,
-                             arm_control.HOMING_TIME_MS / 1000.0 + 1.0)
-                return dict(dropped=True, carry_px=carry_px, image=None)
-            print('  still held at {:.0f},{:.0f}'.format(*carry_px))
+            detail = 'seen at {}, held at {:.0f},{:.0f}'.format(
+                'nowhere' if carry_px is None else '{:.0f},{:.0f}'.format(*carry_px),
+                *held_px)
+        else:
+            continue
+        if not still_held:
+            print('  the sweet is no longer in the jaws ({}); not putting anything '
+                  'down'.format(detail))
+            opened = list(session.pose)
+            opened[5] = gripper_state.OPEN_CMD
+            session.send(opened, 1200, 2.0)
+            session.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS,
+                         arm_control.HOMING_TIME_MS / 1000.0 + 1.0)
+            return dict(dropped=True, carry_px=carry_px, image=None,
+                        carry_check=carry_check)
+        print('  still held ({})'.format(detail))
     opened = list(route['release'])
     opened[5] = gripper_state.OPEN_CMD
     session.send(opened, 1200, 2.0)
@@ -242,4 +259,4 @@ def execute(session, route, snapshot=None, held_px=None):
     image = snapshot() if snapshot is not None else None
     session.send(list(arm_control.HOME_POSE), arm_control.HOMING_TIME_MS,
                  arm_control.HOMING_TIME_MS / 1000.0 + 1.0)
-    return dict(dropped=False, carry_px=carry_px, image=image)
+    return dict(dropped=False, carry_px=carry_px, image=image, carry_check=carry_check)
