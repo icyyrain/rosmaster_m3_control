@@ -168,7 +168,7 @@ def main():
             losses = []
             while True:
                 rng, key = jax.random.split(rng)
-                action = np.asarray(agent.sample_actions(
+                action = np.array(agent.sample_actions(          # a writable copy
                     {'state': jnp.asarray(observation)}, seed=key, argmax=False),
                     dtype=np.float32)
                 if not args.close_noise:
