@@ -9,7 +9,9 @@ changes this file and nothing in the learner.
 
 It only takes over when the policy is clearly going wrong, so the policy is
 corrected rather than replaced (docs/BC_RL_PLAN.md section 8):
-  * the sweet is out of view, or more than ERROR_PX from the gripper pixel;
+  * the sweet is out of view, or more than ERROR_PX from the gripper pixel
+    while the policy is not bringing it back (moving less than TOWARD_MM
+    toward it this step);
   * below the grasp height (within 3 mm of the safety floor) and still going down;
   * STALL_STEPS steps with neither the height nor the alignment improving,
     which includes hovering ready to close without closing;
@@ -18,6 +20,11 @@ Each takeover lasts up to TAKEOVER_STEPS steps, then control goes back.
 
 Off unless the episode asks: reset(options={"intervene": True}). Evaluation
 never asks, so it always measures the policy alone.
+
+The first S3 run (2026-10-20) took over whenever the sweet was more than
+80 px off. Ten of its fifteen takeovers came in the first steps, where the
+deliberately offset start alone puts the sweet 90-170 px off and the policy
+was already heading back, only descending more slowly than the expert.
 """
 
 import math
@@ -25,11 +32,13 @@ import math
 import gymnasium as gym
 import numpy as np
 
+from pc_client.red_rl import cartesian
 from pc_client.red_rl import env as red_env
 from pc_client.red_rl import expert as red_expert
 
 TAKEOVER_STEPS = 3
 ERROR_PX = 80.0
+TOWARD_MM = 1.0                  # off target and moving less than this toward it
 STALL_STEPS = 3
 STALL_HEIGHT_MM = 0.5            # less descent than this over STALL_STEPS steps
 STALL_ERROR_PX = 10.0            # and less alignment gain than this: no progress
@@ -49,7 +58,7 @@ def reason_to_intervene(observation, action, history, steps_left):
     closing = action[CLOSE] > red_env.CLOSE_THRESHOLD
     if not visible:
         return 'target_not_visible'
-    if math.hypot(dx, dy) > ERROR_PX:
+    if math.hypot(dx, dy) > ERROR_PX and toward_mm(observation, action) < TOWARD_MM:
         return 'off_target'
     if height < 0.0 and action[UP] < 0.0 and not closing:
         return 'below_grasp_and_descending'
@@ -61,6 +70,19 @@ def reason_to_intervene(observation, action, history, steps_left):
                 and then[1] - now[1] < STALL_ERROR_PX):
             return 'no_progress'
     return None
+
+
+def toward_mm(observation, action):
+    """How far this action moves the gripper toward the sweet, horizontally, mm.
+
+    The direction is the expert's: it moves straight at the sweet.
+    """
+    desired = np.asarray(red_expert.expert(observation)[:UP], dtype=float)
+    length = float(np.linalg.norm(desired))
+    if length < 1e-6:
+        return 0.0
+    move = np.asarray(action[:UP], dtype=float) * cartesian.MAX_STEP_MM
+    return float(move @ desired / length)
 
 
 class RuleIntervention(gym.Wrapper):

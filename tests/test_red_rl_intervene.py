@@ -32,6 +32,19 @@ class ReasonTests(unittest.TestCase):
         self.assertEqual(self.reason(observation(height=-1.0)), 'below_grasp_and_descending')
         self.assertEqual(self.reason(observation(), steps_left=3), 'running_out_of_steps')
 
+    def test_far_off_but_heading_back_is_left_alone(self):
+        # The offset start: the sweet 127 px above the gripper pixel (the
+        # gripper is short of it) and the policy moving out toward it, as it
+        # did in the first S3 run when the old rule took over anyway.
+        obs = observation(dx=5, dy=-127, height=35.0, step=0)
+        heading_back = np.asarray([0.96, 0.12, -0.39, -0.93], dtype=np.float32)
+        self.assertGreater(intervene.toward_mm(obs, heading_back), 3.0)
+        self.assertIsNone(self.reason(obs, heading_back))
+        moving_away = np.asarray([-0.6, 0.0, -0.39, -0.93], dtype=np.float32)
+        self.assertEqual(self.reason(obs, moving_away), 'off_target')
+        sideways = np.asarray([0.0, 0.9, -0.39, -0.93], dtype=np.float32)
+        self.assertEqual(self.reason(obs, sideways), 'off_target')
+
     def test_closing_is_never_overridden_for_time_or_height(self):
         self.assertIsNone(self.reason(observation(height=-1.0), action=CLOSE, steps_left=1))
 
