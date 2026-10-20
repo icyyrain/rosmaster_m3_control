@@ -10,6 +10,10 @@ First, as a check, it holds out whole episodes, trains on the rest and
 reports how well the held-out expert actions are reproduced, including the
 one decision that ends an episode: when to close. Then it trains on every
 episode and saves that checkpoint for the arm.
+
+--auto-close trains for the environment that closes in the grasp region by
+itself: the demonstrations are recast (common.for_auto_close) and the close
+value is open throughout, so only the moves are learned.
 """
 
 import argparse
@@ -69,10 +73,12 @@ def main():
     parser.add_argument('--log-prob-weight', type=float, default=0.0,
                         help='Also fit the action spread (0 = mean only, as M3). '
                              'SAC samples that spread to explore, so S2 wants it fitted.')
+    parser.add_argument('--auto-close', action='store_true',
+                        help='Learn the moves only, for the auto-closing environment.')
     args = parser.parse_args()
 
     out = Path(args.out or 'models/red_sweet_rl/bc-' + time.strftime('%Y%m%d-%H%M%S'))
-    observations, actions, episodes = common.load_demos(args.demos)
+    observations, actions, episodes = common.load_demos(args.demos, args.auto_close)
     ids = np.unique(episodes)
     print('{} demonstration steps in {} episodes'.format(len(actions), len(ids)))
 
@@ -85,10 +91,14 @@ def main():
     check = dict(holdout_episodes=sorted(held.tolist()),
                  train=score(check_agent, observations[train_rows], actions[train_rows]),
                  holdout=score(check_agent, observations[~train_rows], actions[~train_rows]))
-    print('held-out: mean error {} mm (radial, lateral, up), closes on {:.0%} of '
-          'the expert closes, closes early on {:.1%} of other steps'.format(
-              check['holdout']['mae_mm_per_dim'], check['holdout']['close_recall'],
-              check['holdout']['early_close_rate']))
+    if args.auto_close:
+        print('held-out: mean error {} mm (radial, lateral, up)'.format(
+            check['holdout']['mae_mm_per_dim']))
+    else:
+        print('held-out: mean error {} mm (radial, lateral, up), closes on {:.0%} of '
+              'the expert closes, closes early on {:.1%} of other steps'.format(
+                  check['holdout']['mae_mm_per_dim'], check['holdout']['close_recall'],
+                  check['holdout']['early_close_rate']))
 
     print('final: training on all {} episodes'.format(len(ids)))
     agent = train(observations, actions, args.updates, args.batch_size, args.seed,
@@ -96,7 +106,7 @@ def main():
     common.save(agent, out / 'checkpoints', args.updates)
     final = score(agent, observations, actions)
     common.write_json(out / 'summary.json', dict(
-        stage='M3 behaviour cloning', demos=str(args.demos),
+        stage='M3 behaviour cloning', demos=str(args.demos), auto_close=args.auto_close,
         demos_sha256=common.sha256(args.demos), updates=args.updates,
         batch_size=args.batch_size, seed=args.seed, loss='bc mse + {} x log-prob'.format(args.log_prob_weight),
         agent=common.AGENT_KWARGS, check=check, final_train=final))

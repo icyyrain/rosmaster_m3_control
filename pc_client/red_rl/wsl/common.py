@@ -85,9 +85,11 @@ def for_auto_close(transitions):
     return kept, len(episodes) - dropped, dropped
 
 
-def load_demos(path):
+def load_demos(path, auto_close=False):
     """Arrays from a demonstration file: observations, actions, episode ids."""
     transitions = load_transition_dataset(path)
+    if auto_close:
+        transitions = for_auto_close(transitions)[0]
     observations = np.stack([t.observation for t in transitions]).astype(np.float32)
     actions = np.stack([t.executed_action for t in transitions]).astype(np.float32)
     episodes = np.asarray([t.episode_id for t in transitions])
