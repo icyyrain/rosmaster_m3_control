@@ -109,6 +109,23 @@ class CarryJudgeTests(unittest.TestCase):
         away = (HELD[0] + 2 * hold_check.CARRY_SHIFT_PX + 40,) + HELD[1:]
         self.assertFalse(hold_check.judge_carry(frame(HELD), frame(away))[0])
 
+    def test_a_little_red_still_in_place_is_held(self):
+        # S3 evaluation, 2026-10-20: 408 px after the lift, 97 px at the carry
+        # pose, all in place. The old 120 px floor called it dropped.
+        lift = frame((GX, GY + 20, 12))
+        carry = frame((GX, GY + 20, 6))
+        held, evidence = hold_check.judge_carry(lift, carry)
+        self.assertLess(evidence['red_carry_px'], hold_check.MIN_RED_PX)
+        self.assertTrue(held)
+        self.assertEqual(evidence['overlap_at_zero'], 1.0)
+
+    def test_a_sweet_on_the_table_ahead_is_dropped(self):
+        # S3 evaluation episode 20: little red at the lift, the fallen sweet
+        # large and elsewhere at the carry pose.
+        held, _ = hold_check.judge_carry(frame((GX, GY + 20, 15)),
+                                         frame((GX - 20, GY - 120, 40)))
+        self.assertFalse(held)
+
     def test_no_red_at_the_lift_does_not_abort(self):
         held, evidence = hold_check.judge_carry(EMPTY, EMPTY)
         self.assertTrue(held)

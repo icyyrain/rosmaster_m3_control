@@ -14,8 +14,9 @@ import reach_candy
 
 METHOD = 'short_lift_motion_v2'
 # The short lift followed by hold_check's base turn, which decides when it can.
-TURN_METHOD = METHOD + '+base_turn_v2'
-KNOWN_METHODS = ('short_lift_motion_v1', METHOD, METHOD + '+base_turn_v1', TURN_METHOD)
+TURN_METHOD = METHOD + '+base_turn_v3'
+KNOWN_METHODS = ('short_lift_motion_v1', METHOD, METHOD + '+base_turn_v1',
+                 METHOD + '+base_turn_v2', TURN_METHOD)
 MIN_EXPECTED_MOTION_PX = 45.0
 # v1 accepted up to 0.30. An expert grasp at 0.22 was carried off and dropped
 # on the way, seen by the operator; another at 0.20 was a loose hold. Of 14

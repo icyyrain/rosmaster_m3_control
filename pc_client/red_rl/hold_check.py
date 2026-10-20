@@ -20,6 +20,13 @@ the sweet sat half behind a jaw at the frame edge, so what showed of it
 changed shape across the turn and no shift matched (v1: cannot tell). The
 best shift is still recorded.
 
+v3 stops requiring MIN_RED_PX after the motion. In an S3 evaluation
+(2026-10-20) a sweet held twist-up showed 408 px of red after the lift and
+97 px at the carry pose, all of it where it had been (overlap 1.00); the
+carry check called it dropped for falling under the 120 px floor, and the
+arm let go. Now the red counts as gone only below GONE_RED_PX; otherwise
+whatever is left is judged by how much of it is still in place.
+
 The same mask comparison checks the carry: a held sweet is rigid with the
 camera, so at the carry pose its red is where it was after the lift.
 """
@@ -30,17 +37,18 @@ import numpy as np
 import reach_candy
 from pc_client.red_rl import auto_reward
 
-METHOD = 'base_turn_v2'
+METHOD = 'base_turn_v3'
 
 TURN_DEG = 4
 TURN_MS = 500
 TURN_SETTLE_S = 1.5
-MIN_RED_PX = 120                 # too little red near the jaws to compare
+MIN_RED_PX = 120                 # too little red after the lift to judge by
+GONE_RED_PX = 40                 # after the motion, less than this: the red has gone
 STAYED_OVERLAP = 0.6             # this much of the red in place: it turned with us
 LEFT_OVERLAP = 0.3               # this little: it stayed with the table
-MIN_OVERLAP = 0.35               # carry: the best shift must explain the red this well
+CARRY_OVERLAP = 0.3              # carry: held if this much of the red is still in place
 MAX_SHIFT_PX = 160
-CARRY_SHIFT_PX = 40              # a held sweet may swing this much while carried
+CARRY_SHIFT_PX = 40              # searched for the record only
 
 ROI_ABOVE_PX = 260               # rows from gripper_y - this to the bottom edge
 ROI_HALF_WIDTH_PX = 320
@@ -91,7 +99,7 @@ def judge_turn(before_bgr, after_bgr):
                     red_before_px=int(before.sum()), red_after_px=int(after.sum()),
                     shift_px=None, overlap=None, overlap_at_zero=None,
                     success=None, reason=None)
-    if before.sum() >= MIN_RED_PX and after.sum() >= MIN_RED_PX:
+    if before.sum() >= MIN_RED_PX and after.sum() >= GONE_RED_PX:
         dx, overlap, zero = horizontal_shift(before, after)
         evidence.update(shift_px=dx, overlap=round(overlap, 3),
                         overlap_at_zero=round(zero, 3))
@@ -105,7 +113,7 @@ def decide_turn(evidence):
     if evidence['red_before_px'] < MIN_RED_PX:
         # A held sweet can hide behind the jaws; leave it to the lift check.
         return None, 'no_red_near_the_jaws_after_the_lift'
-    if evidence['red_after_px'] < MIN_RED_PX:
+    if evidence['red_after_px'] < GONE_RED_PX:
         return False, 'red_left_the_view_on_the_turn'
     zero = evidence.get('overlap_at_zero')
     if zero is None:
@@ -121,16 +129,16 @@ def judge_carry(lift_bgr, carry_bgr):
     """Still held at the carry pose? (True/False, evidence)."""
     before, after = red_near_jaws(lift_bgr), red_near_jaws(carry_bgr)
     evidence = dict(red_lift_px=int(before.sum()), red_carry_px=int(after.sum()),
-                    shift_px=None, overlap=None, reason=None)
+                    shift_px=None, overlap=None, overlap_at_zero=None, reason=None)
     if before.sum() < MIN_RED_PX:
         evidence['reason'] = 'no_red_after_the_lift_to_compare'
         return True, evidence            # nothing to judge by; do not abort
-    if after.sum() < MIN_RED_PX:
+    if after.sum() < GONE_RED_PX:
         evidence['reason'] = 'red_gone_from_the_jaws'
         return False, evidence
-    dx, overlap, _ = horizontal_shift(before, after, max_shift=CARRY_SHIFT_PX * 2)
-    evidence.update(shift_px=dx, overlap=round(overlap, 3))
-    held = bool(overlap >= MIN_OVERLAP and abs(dx) <= CARRY_SHIFT_PX)
+    dx, overlap, zero = horizontal_shift(before, after, max_shift=CARRY_SHIFT_PX * 2)
+    evidence.update(shift_px=dx, overlap=round(overlap, 3), overlap_at_zero=round(zero, 3))
+    held = bool(zero >= CARRY_OVERLAP)
     evidence['reason'] = 'red_still_in_the_jaws' if held else 'red_moved_off_the_jaws'
     return held, evidence
 
