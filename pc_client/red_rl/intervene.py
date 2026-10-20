@@ -9,14 +9,23 @@ changes this file and nothing in the learner.
 
 It only takes over when the policy is clearly going wrong, so the policy is
 corrected rather than replaced (docs/BC_RL_PLAN.md section 8):
-  * the sweet is out of view, or more than ERROR_PX from the gripper pixel
-    while the policy is not bringing it back (moving less than TOWARD_MM
-    toward it this step);
+  * the sweet is out of view, or more than ERROR_PX from the gripper pixel or
+    BOTTOM_DY_PX below it (the gripper pixel is only 40 px above the frame's
+    bottom edge), while the policy is not bringing it back (moving less than
+    TOWARD_MM toward it this step);
   * below the grasp height (within 3 mm of the safety floor) and still going down;
   * STALL_STEPS steps with neither the height nor the alignment improving,
     which includes hovering ready to close without closing;
-  * LAST_STEPS or fewer steps left and the policy is not closing.
+  * LAST_STEPS or fewer steps left and the policy is not closing;
+  * closing while still well above the grasp height or far off the sweet.
+    A person watching would hold the gripper open; HIL-SERL's own gripper
+    has a separate discrete critic and a grasp penalty, which this
+    continuous close does not, and a fresh policy (S4) would otherwise close
+    in mid-air on about half its steps.
 Each takeover lasts up to TAKEOVER_STEPS steps, then control goes back.
+
+Out of view, the corrector moves toward where the sweet was last seen
+rather than only climbing: the episode ends after two steps without it.
 
 Off unless the episode asks: reset(options={"intervene": True}). Evaluation
 never asks, so it always measures the policy alone.
@@ -39,6 +48,13 @@ from pc_client.red_rl import expert as red_expert
 TAKEOVER_STEPS = 3
 ERROR_PX = 80.0
 TOWARD_MM = 1.0                  # off target and moving less than this toward it
+# A fresh policy in the kinematic fake (S4 dry run, 2026-10-20) lost the sweet
+# out of the bottom of the frame in 3-6 steps, never more than 80 px off.
+BOTTOM_DY_PX = 25.0
+# Of 43 held evaluation grasps up to 2026-10-20 the highest closed 4.6 mm
+# above the grasp height and the furthest 65 px off the gripper pixel.
+CLOSE_HEIGHT_MM = 6.0
+CLOSE_ERROR_PX = 70.0
 STALL_STEPS = 3
 STALL_HEIGHT_MM = 0.5            # less descent than this over STALL_STEPS steps
 STALL_ERROR_PX = 10.0            # and less alignment gain than this: no progress
@@ -58,7 +74,11 @@ def reason_to_intervene(observation, action, history, steps_left):
     closing = action[CLOSE] > red_env.CLOSE_THRESHOLD
     if not visible:
         return 'target_not_visible'
-    if math.hypot(dx, dy) > ERROR_PX and toward_mm(observation, action) < TOWARD_MM:
+    error = math.hypot(dx, dy)
+    if closing and (height > CLOSE_HEIGHT_MM or error > CLOSE_ERROR_PX):
+        return 'premature_close'
+    if ((error > ERROR_PX or dy > BOTTOM_DY_PX)
+            and toward_mm(observation, action) < TOWARD_MM):
         return 'off_target'
     if height < 0.0 and action[UP] < 0.0 and not closing:
         return 'below_grasp_and_descending'
@@ -95,6 +115,7 @@ class RuleIntervention(gym.Wrapper):
 
     def _clear(self):
         self.observation = None
+        self.last_seen = None
         self.history = []
         self.steps = 0
         self.remaining = 0
@@ -108,7 +129,18 @@ class RuleIntervention(gym.Wrapper):
         observation, info = self.env.reset(seed=seed, options=options)
         self._clear()
         self.observation = observation
+        if red_expert.read(observation)[2]:
+            self.last_seen = observation
         return observation, dict(info, intervention_enabled=self.active)
+
+    def correction(self):
+        """The corrector's action; out of view, toward where the sweet was last seen."""
+        if red_expert.read(self.observation)[2] or self.last_seen is None:
+            return self.corrector(self.observation)
+        back = np.array(self.corrector(self.last_seen), dtype=np.float32)
+        back[UP] = max(float(back[UP]), 0.0)        # never descend blind
+        back[CLOSE] = -1.0
+        return back
 
     def step(self, action):
         action = np.asarray(action, dtype=np.float32)
@@ -126,7 +158,7 @@ class RuleIntervention(gym.Wrapper):
                     self.count += 1
                     print('  corrector takes over: {}'.format(self.reason))
             if self.remaining > 0:
-                executed = np.asarray(self.corrector(self.observation), dtype=np.float32)
+                executed = np.asarray(self.correction(), dtype=np.float32)
                 intervened = True
                 self.remaining -= 1
                 self.intervention_steps += 1
@@ -134,6 +166,8 @@ class RuleIntervention(gym.Wrapper):
                     self.remaining = 0
         observation, reward, terminated, truncated, info = self.env.step(executed)
         self.observation = observation
+        if red_expert.read(observation)[2]:
+            self.last_seen = observation
         self.steps += 1
         if intervened:
             # Lists, not arrays: the info dictionary crosses the RPC as JSON.

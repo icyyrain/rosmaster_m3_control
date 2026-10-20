@@ -45,6 +45,18 @@ class ReasonTests(unittest.TestCase):
         sideways = np.asarray([0.0, 0.9, -0.39, -0.93], dtype=np.float32)
         self.assertEqual(self.reason(obs, sideways), 'off_target')
 
+    def test_a_close_in_mid_air_or_far_off_is_held_back(self):
+        self.assertEqual(self.reason(observation(height=12.0), CLOSE), 'premature_close')
+        self.assertEqual(self.reason(observation(dx=75, height=1.0), CLOSE), 'premature_close')
+        # as high and as far off as real grasps that held
+        self.assertIsNone(self.reason(observation(dx=60, height=4.5), CLOSE))
+
+    def test_near_the_bottom_edge_and_not_coming_back(self):
+        obs = observation(dy=30, height=8.0)
+        self.assertEqual(self.reason(obs, DESCEND), 'off_target')
+        coming_back = np.asarray([-0.5, 0.0, -1.0, -1.0], dtype=np.float32)
+        self.assertIsNone(self.reason(obs, coming_back))
+
     def test_closing_is_never_overridden_for_time_or_height(self):
         self.assertIsNone(self.reason(observation(height=-1.0), action=CLOSE, steps_left=1))
 
@@ -88,6 +100,22 @@ class WrapperTests(unittest.TestCase):
         for seed in range(5):
             steps, _ = self.run_episode(expert, intervene_on=True, seed=seed)
             self.assertEqual(steps[-1]['intervention_count'], 0)
+
+    def test_a_policy_that_always_closes_is_held_back_until_it_is_low(self):
+        steps, reward = self.run_episode(lambda obs: CLOSE, intervene_on=True)
+        self.assertEqual(steps[0]['intervention_reason'], 'premature_close')
+        self.assertGreater(len(steps), 3)          # not over at the first step
+        self.assertEqual(reward, 1.0)
+
+    def test_out_of_view_it_goes_back_toward_where_the_sweet_was(self):
+        env = intervene.RuleIntervention(red_env.FakeRedSweetEnv(seed=1))
+        env.reset(options={'intervene': True})
+        env.last_seen = observation(dy=35, height=6.0)       # last seen low in the frame
+        env.observation = observation(visible=False)
+        back = env.correction()
+        self.assertLess(back[0], 0.0)                        # radial in, bringing it up
+        self.assertGreaterEqual(back[intervene.UP], 0.0)     # never descending blind
+        self.assertLess(back[intervene.CLOSE], 0.0)
 
     def test_takeover_is_short(self):
         steps, _ = self.run_episode(lambda obs: HOVER, intervene_on=True)

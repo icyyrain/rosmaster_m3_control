@@ -18,6 +18,11 @@ environment's safety box and episode endings are unchanged. Checkpoints,
 online transitions (schema version 1) and per-episode metrics go to the run
 directory; --resume continues from its latest checkpoint and transitions.
 
+S4 (--from-scratch --bc-weight 0 --intervene): HIL-SERL as published, with
+the rule corrector for the person: a freshly initialised agent, plain SAC
+updates (no pull toward the demonstrations), demonstrations only as half of
+every batch.
+
 S3 (--intervene): each reset asks the served environment for the rule
 corrector (intervene.py). When it takes over, info["intervene_action"] is
 the action actually executed; as in HIL-SERL's train_rlpd.py, that
@@ -92,6 +97,15 @@ def explore(sample, mode, args):
     return action
 
 
+def update(agent, batch, demo_buffer, args):
+    """One update: SAC plus the pull toward demonstrations, or plain SAC."""
+    if args.bc_weight <= 0.0:
+        return agent.update(batch)
+    expert = jax.device_put(demo_buffer.sample(args.batch_size))
+    return update_state_sac_with_bc(agent, batch, expert, args.bc_weight,
+                                    args.bc_log_prob_weight, args.bc_mse_weight)
+
+
 def scalars(info):
     flat = {}
     for group, values in info.items():
@@ -105,7 +119,10 @@ def scalars(info):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--init', required=True, help='BC model directory')
+    start = parser.add_mutually_exclusive_group(required=True)
+    start.add_argument('--init', help='Model directory to start from (BC, or an S2 run).')
+    start.add_argument('--from-scratch', action='store_true',
+                       help='A freshly initialised agent, as HIL-SERL starts (S4).')
     parser.add_argument('--demos', required=True)
     parser.add_argument('--seed-transitions', nargs='*', default=[],
                         help='Earlier policy transitions to start the online buffer with.')
@@ -114,7 +131,8 @@ def main():
     parser.add_argument('--utd', type=int, default=8, help='Updates per arm step.')
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--critic-warmup', type=int, default=2000)
-    parser.add_argument('--bc-weight', type=float, default=1.0)
+    parser.add_argument('--bc-weight', type=float, default=1.0,
+                        help='0: plain SAC updates, as HIL-SERL (S4).')
     parser.add_argument('--bc-log-prob-weight', type=float, default=0.0)
     parser.add_argument('--bc-mse-weight', type=float, default=1.0)
     parser.add_argument('--actor-delay-steps', type=int, default=0,
@@ -164,7 +182,10 @@ def main():
         update_step = int(Path(checkpoint).name.split('_')[-1])
         print('resumed {} at episode {}'.format(checkpoint, episode_index))
     else:
-        agent, checkpoint = common.restore(Path(args.init) / 'checkpoints', args.seed)
+        if args.from_scratch:
+            agent, checkpoint = common.make_agent(args.seed), 'scratch'
+        else:
+            agent, checkpoint = common.restore(Path(args.init) / 'checkpoints', args.seed)
         episode_index, update_step = 0, 0
         print('initialised from {}; warming up the critic for {} updates on {} '
               'demonstration and {} seed transitions'.format(
@@ -187,10 +208,7 @@ def main():
     agent.sample_actions({'state': jnp.asarray(probe)}, seed=rng, argmax=False)
     batch = mixed_batch(online_buffer if len(online_buffer) else demo_buffer,
                         demo_buffer, args.batch_size)
-    expert = jax.device_put(demo_buffer.sample(args.batch_size))
-    jax.block_until_ready(update_state_sac_with_bc(          # result discarded
-        agent, batch, expert, args.bc_weight, args.bc_log_prob_weight,
-        args.bc_mse_weight))
+    jax.block_until_ready(update(agent, batch, demo_buffer, args))   # result discarded
     print('compiled the action and update functions', flush=True)
 
     env = RemoteEnv(args.host or windows_host(), args.port, timeout=600.0)
@@ -239,10 +257,7 @@ def main():
                         agent, update_info = agent.update(
                             batch, networks_to_update=frozenset({'critic'}))
                     else:
-                        expert = jax.device_put(demo_buffer.sample(args.batch_size))
-                        agent, update_info = update_state_sac_with_bc(
-                            agent, batch, expert, args.bc_weight,
-                            args.bc_log_prob_weight, args.bc_mse_weight)
+                        agent, update_info = update(agent, batch, demo_buffer, args)
                     update_step += 1
                 run_steps += 1
                 losses.append(scalars(update_info))
