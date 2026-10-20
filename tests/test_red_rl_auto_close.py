@@ -56,6 +56,25 @@ class AutoCloseTests(unittest.TestCase):
         steps, _, info, _ = run(hover_and_close, auto_close=False)
         self.assertEqual(steps, 1)
 
+    def test_low_but_off_tries_on_the_last_step_only(self):
+        off = observation(dx=55, height=0.5)
+        self.assertFalse(red_env.auto_close_now(off, last_step=False))
+        self.assertTrue(red_env.auto_close_now(off, last_step=True))
+        self.assertFalse(red_env.auto_close_now(observation(dx=55, height=3.0), last_step=True))
+        self.assertFalse(red_env.auto_close_now(observation(visible=False, height=0.5),
+                                                last_step=True))
+
+    def test_a_policy_that_gets_low_but_drifts_off_still_gets_its_try(self):
+        def descend_then_sidestep(obs):
+            low = obs[4] * 50.0 <= 4.0
+            return np.asarray([0.0, 0.6 if low else 0.0, -1.0, -1.0], dtype=np.float32)
+        tried = 0
+        for seed in range(6):
+            steps, _, info, _ = run(descend_then_sidestep, auto_close=True, seed=seed)
+            if steps == red_env.MAX_STEPS and info['outcome'] in ('held', 'not_held'):
+                tried += 1
+        self.assertGreater(tried, 0)
+
     def test_off_by_default(self):
         steps, _, info, _ = run(moves_only, auto_close=False)
         self.assertEqual(info['outcome'], 'step_limit')

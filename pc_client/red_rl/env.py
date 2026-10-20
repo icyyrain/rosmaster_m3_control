@@ -69,6 +69,10 @@ STEP_SETTLE_S = 1.0
 CLOSE_THRESHOLD = 0.0
 # The grasp region: the rule expert closes here, and with reset option
 # auto_close the environment closes here by itself, the policy only moving.
+# Like the expert, it also tries on the last step if the gripper is low enough
+# however far off: in the first auto-close evaluation (2026-10-20) three of
+# twenty episodes ran out of steps at the grasp height, 45-65 px off and
+# bouncing either side of the sweet, and grasps that far off have held.
 GRASP_REGION_HEIGHT_MM = 1.5     # at most this far above the grasp height
 GRASP_REGION_PX = 25.0           # and the sweet this close to the gripper pixel
 
@@ -95,6 +99,16 @@ def in_grasp_region(observation):
     error = math.hypot(o[0] * 640.0, o[1] * 360.0)
     return bool(o[2] > 0.5 and o[4] * 50.0 <= GRASP_REGION_HEIGHT_MM
                 and error <= GRASP_REGION_PX)
+
+
+def low_enough(observation):
+    o = np.asarray(observation, dtype=float)
+    return bool(o[2] > 0.5 and o[4] * 50.0 <= GRASP_REGION_HEIGHT_MM)
+
+
+def auto_close_now(observation, last_step):
+    """Under auto_close: in the grasp region, or low enough on the last step."""
+    return in_grasp_region(observation) or (last_step and low_enough(observation))
 
 
 def episode_step_limit(options):
@@ -406,7 +420,7 @@ class RedSweetApproachEnv(gym.Env):
             self._retreat()
             self.audit.finish(outcome='target_lost', reward=0.0)
             return observation, 0.0, True, False, dict(info, outcome='target_lost')
-        if self.auto_close and in_grasp_region(observation):
+        if self.auto_close and auto_close_now(observation, self.steps >= self.max_steps):
             return self._close(action)
         if self.steps >= self.max_steps:
             self._retreat()
@@ -536,7 +550,7 @@ class FakeRedSweetEnv(gym.Env):
         info = {'fake': True, 'clipped': bool(clipped), 'outcome': None}
         if self.lost >= LOST_LIMIT:
             return observation, 0.0, True, False, dict(info, outcome='target_lost')
-        if self.auto_close and in_grasp_region(observation):
+        if self.auto_close and auto_close_now(observation, self.steps >= self.max_steps):
             return self._grasp(observation)
         truncated = self.steps >= self.max_steps
         if truncated:
