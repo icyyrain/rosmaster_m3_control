@@ -23,10 +23,10 @@ from pc_client.red_rl import env as red_env
 
 MM_PER_PX = red_env.MM_PER_PX
 HORIZONTAL_GAIN = 0.8            # under-correct a little; the loop closes it
-ALIGN_PX = 25.0                  # the rule teacher's re-centre tolerance
+ALIGN_PX = red_env.GRASP_REGION_PX   # the rule teacher's re-centre tolerance
 SLOW_DESCENT_PX = 60.0           # descend slowly while further off than this
 SLOW_DESCENT_MM = 1.0
-HEIGHT_READY_MM = 1.5
+HEIGHT_READY_MM = red_env.GRASP_REGION_HEIGHT_MM
 LOST_CLIMB_MM = 3.0              # climb when the sweet is out of view
 
 

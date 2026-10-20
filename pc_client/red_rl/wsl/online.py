@@ -155,6 +155,9 @@ def main():
                         help='Episode step limit during training (evaluation keeps 20).')
     parser.add_argument('--max-failures', type=int, default=6,
                         help='Stop after this many unrewarded episodes in a row.')
+    parser.add_argument('--auto-close', action='store_true',
+                        help='The environment closes in the grasp region and the policy '
+                             'only moves; demonstrations are recast to match.')
     parser.add_argument('--intervene', action='store_true',
                         help='S3: let the rule corrector take over when the policy is '
                              'clearly going wrong.')
@@ -167,6 +170,10 @@ def main():
     out = Path(args.out)
     (out / 'transitions').mkdir(parents=True, exist_ok=True)
     demos = load_transition_dataset(args.demos)
+    if args.auto_close:
+        demos, kept, dropped = common.for_auto_close(demos)
+        print('demonstrations recast for auto-close: {} episodes, {} transitions '
+              '({} dropped: closed outside the grasp region)'.format(kept, len(demos), dropped))
     online_files = sorted((out / 'transitions').glob('episode_*.npz'))
     previous = [t for path in online_files for t in load_transition_dataset(path)]
     corrected = [t for t in previous if t.intervention] if args.resume else []
@@ -219,7 +226,11 @@ def main():
         while episode_index < args.episodes:
             try:
                 observation, info = env.reset(options={'max_steps': args.max_steps,
-                                                       'intervene': args.intervene})
+                                                       'intervene': args.intervene,
+                                                       'auto_close': args.auto_close})
+                if args.auto_close and not info.get('auto_close'):
+                    raise SystemExit('the served environment cannot auto-close; '
+                                     'restart env_server from this commit')
                 if args.intervene and not info.get('intervention_enabled'):
                     raise SystemExit('the served environment has no rule corrector; '
                                      'restart env_server from this commit')
@@ -235,10 +246,14 @@ def main():
                     dtype=np.float32)
                 mode = common.act(agent, np.asarray(observation, dtype=np.float32))
                 action = explore(sample, mode, args)
+                if args.auto_close:
+                    action = common.without_close(action)
                 next_observation, reward, terminated, truncated, info = env.step(action)
                 corrected = 'intervene_action' in info
                 executed = (np.asarray(info['intervene_action'], dtype=np.float32)
                             if corrected else action)
+                if args.auto_close:
+                    executed = common.without_close(executed)
                 transition = Transition(
                     observation=observation, policy_action=action, executed_action=executed,
                     next_observation=next_observation, reward=reward,

@@ -5,8 +5,10 @@ transition schema, so what is learned here is what the plug-insertion work
 will use. Run with PYTHONPATH set as in run_wsl.sh.
 """
 
+import dataclasses
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -19,6 +21,10 @@ from isaaclab_hil_serl.learning import make_state_sac_agent
 STATE_DIM = 10                   # pc_client/red_rl/env.py OBSERVATION_NAMES
 ACTION_DIM = 4                   # (radial, lateral, up, close)
 CLOSE = 3
+# pc_client/red_rl/env.py; that module needs the robot stack, so mirrored here.
+GRASP_REGION_HEIGHT_MM = 1.5
+GRASP_REGION_PX = 25.0
+OPEN = -1.0                      # the close value sent and stored under auto-close
 AGENT_KWARGS = dict(hidden_dims=(256, 256), discount=0.97,
                     target_entropy=-ACTION_DIM / 2.0)
 
@@ -29,6 +35,54 @@ def make_agent(seed=0):
         sample_observation={'state': jnp.zeros(STATE_DIM, dtype=jnp.float32)},
         sample_action=jnp.zeros(ACTION_DIM, dtype=jnp.float32),
         **AGENT_KWARGS)
+
+
+def in_grasp_region(observation):
+    o = np.asarray(observation, dtype=float)
+    return bool(o[2] > 0.5 and o[4] * 50.0 <= GRASP_REGION_HEIGHT_MM
+                and math.hypot(o[0] * 640.0, o[1] * 360.0) <= GRASP_REGION_PX)
+
+
+def without_close(action):
+    """The action with its close value fixed open: under auto-close it does nothing."""
+    action = np.array(action, dtype=np.float32)
+    action[CLOSE] = OPEN
+    return action
+
+
+def for_auto_close(transitions):
+    """Demonstrations recast for an environment that closes in the grasp region.
+
+    The expert closed with a stationary close action once in the region; the
+    environment now closes as the move into the region lands. So each episode
+    ends at its first transition that arrives in the region, carrying the
+    episode's outcome, and every close value is set open. Episodes the expert
+    closed outside the region (its last-step attempt) cannot be recast and are
+    dropped. Returns (transitions, episodes kept, episodes dropped).
+    """
+    episodes = {}
+    for transition in transitions:
+        episodes.setdefault(transition.episode_id, []).append(transition)
+    kept, dropped = [], 0
+    for steps in episodes.values():
+        steps = sorted(steps, key=lambda t: t.step_id)
+        outcome = steps[-1]
+        arrive = next((i for i, t in enumerate(steps)
+                       if in_grasp_region(t.next_observation)), None)
+        if arrive is None or arrive == len(steps) - 1:
+            dropped += 1
+            continue
+        episode_id = len(set(t.episode_id for t in kept))
+        for i, t in enumerate(steps[:arrive + 1]):
+            last = i == arrive
+            kept.append(dataclasses.replace(
+                t, policy_action=without_close(t.policy_action),
+                executed_action=without_close(t.executed_action),
+                reward=outcome.reward if last else 0.0,
+                terminated=True if last else False, truncated=False,
+                success=bool(outcome.success) if last else False,
+                episode_id=episode_id))
+    return kept, len(episodes) - dropped, dropped
 
 
 def load_demos(path):

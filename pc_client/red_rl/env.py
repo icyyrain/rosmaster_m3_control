@@ -67,6 +67,10 @@ BELOW_GRASP_LIMIT_MM = 3.0       # lowest point: this far under the grasp height
 STEP_MS = 600
 STEP_SETTLE_S = 1.0
 CLOSE_THRESHOLD = 0.0
+# The grasp region: the rule expert closes here, and with reset option
+# auto_close the environment closes here by itself, the policy only moving.
+GRASP_REGION_HEIGHT_MM = 1.5     # at most this far above the grasp height
+GRASP_REGION_PX = 25.0           # and the sweet this close to the gripper pixel
 
 OBSERVATION_NAMES = (
     'target_dx', 'target_dy', 'target_visible', 'target_area',
@@ -83,6 +87,14 @@ def teacher_args(host='192.168.2.4', port=9090, execute=True):
         descent_steps=10, settle=0.6, fast=True, creep_controller='auto',
         no_orient_gripper=True, skip_preflight=False, grasp_offset_mm=None,
         squeeze_mm=5.0, keep_holding=False, record=None, execute=execute)
+
+
+def in_grasp_region(observation):
+    """Sweet in view, gripper low enough and aligned: where closing is tried."""
+    o = np.asarray(observation, dtype=float)
+    error = math.hypot(o[0] * 640.0, o[1] * 360.0)
+    return bool(o[2] > 0.5 and o[4] * 50.0 <= GRASP_REGION_HEIGHT_MM
+                and error <= GRASP_REGION_PX)
 
 
 def episode_step_limit(options):
@@ -227,6 +239,7 @@ class RedSweetApproachEnv(gym.Env):
         self.pitch_sum = None
         self.steps = 0
         self.max_steps = MAX_STEPS
+        self.auto_close = False
         self.lost = 0
         self.state = None
         self.observation = None
@@ -321,6 +334,7 @@ class RedSweetApproachEnv(gym.Env):
         _fresh_episode(session)
         self.steps = 0
         self.max_steps = episode_step_limit(options)
+        self.auto_close = bool((options or {}).get('auto_close', False))
         self.lost = 0
         self._go_home()
         try:
@@ -365,13 +379,13 @@ class RedSweetApproachEnv(gym.Env):
             'pose_is_commanded_not_measured': True,
         })
         self.audit._image(session.streams.colour(), 'start.jpg')
-        return self._observe(), self._info(episode=name)
+        return self._observe(), self._info(episode=name, auto_close=self.auto_close)
 
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
         session = self.session
         self.steps += 1
-        if action[3] > CLOSE_THRESHOLD:
+        if action[3] > CLOSE_THRESHOLD and not self.auto_close:
             return self._close(action)
 
         request = action[:3] * cartesian.MAX_STEP_MM
@@ -392,6 +406,8 @@ class RedSweetApproachEnv(gym.Env):
             self._retreat()
             self.audit.finish(outcome='target_lost', reward=0.0)
             return observation, 0.0, True, False, dict(info, outcome='target_lost')
+        if self.auto_close and in_grasp_region(observation):
+            return self._close(action)
         if self.steps >= self.max_steps:
             self._retreat()
             self.audit.finish(outcome='step_limit', reward=0.0)
@@ -447,6 +463,7 @@ class FakeRedSweetEnv(gym.Env):
         self.sweet = None
         self.steps = 0
         self.max_steps = MAX_STEPS
+        self.auto_close = False
         self.lost = 0
 
     def _relative(self):
@@ -475,6 +492,7 @@ class FakeRedSweetEnv(gym.Env):
             self.rng = np.random.default_rng(seed)
         self.steps = 0
         self.max_steps = episode_step_limit(options)
+        self.auto_close = bool((options or {}).get('auto_close', False))
         self.lost = 0
         descent = [int(self.rng.integers(80, 101)), 18, 62,
                    int(self.rng.integers(18, 31)), 90, 90]
@@ -492,7 +510,13 @@ class FakeRedSweetEnv(gym.Env):
             if self._in_frame():
                 break
         self.start_xy = kinematics.gripper_mm(self.pose)[:2].tolist()
-        return self._observation(), {'fake': True}
+        return self._observation(), {'fake': True, 'auto_close': self.auto_close}
+
+    def _grasp(self, observation):
+        radial, lateral, height = self._relative()
+        held = math.hypot(radial, lateral) <= 4.0 and abs(height) <= 3.0
+        return (observation, float(held), True, False,
+                {'fake': True, 'outcome': 'held' if held else 'not_held'})
 
     def _in_frame(self):
         radial, lateral, _ = self._relative()
@@ -503,11 +527,8 @@ class FakeRedSweetEnv(gym.Env):
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
         self.steps += 1
-        if action[3] > CLOSE_THRESHOLD:
-            radial, lateral, height = self._relative()
-            held = math.hypot(radial, lateral) <= 4.0 and abs(height) <= 3.0
-            return (self._observation(), float(held), True, False,
-                    {'fake': True, 'outcome': 'held' if held else 'not_held'})
+        if action[3] > CLOSE_THRESHOLD and not self.auto_close:
+            return self._grasp(self._observation())
         self.pose, _, clipped = safe_step(
             self.pose, action[:3] * cartesian.MAX_STEP_MM, self.pitch_sum,
             self._height, -BELOW_GRASP_LIMIT_MM, self.start_xy)
@@ -515,6 +536,8 @@ class FakeRedSweetEnv(gym.Env):
         info = {'fake': True, 'clipped': bool(clipped), 'outcome': None}
         if self.lost >= LOST_LIMIT:
             return observation, 0.0, True, False, dict(info, outcome='target_lost')
+        if self.auto_close and in_grasp_region(observation):
+            return self._grasp(observation)
         truncated = self.steps >= self.max_steps
         if truncated:
             info['outcome'] = 'step_limit'

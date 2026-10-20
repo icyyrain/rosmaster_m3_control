@@ -42,6 +42,9 @@ def main():
     parser.add_argument('--host', default=None)
     parser.add_argument('--port', type=int, default=18766)
     parser.add_argument('--max-misses', type=int, default=3)
+    parser.add_argument('--auto-close', action='store_true',
+                        help='The environment closes in the grasp region; the policy '
+                             'only moves (for models trained that way).')
     args = parser.parse_args()
 
     agent, checkpoint = common.restore(Path(args.model) / 'checkpoints')
@@ -56,7 +59,10 @@ def main():
     try:
         for episode in range(args.episodes):
             try:
-                observation, info = env.reset()
+                observation, info = env.reset(options={'auto_close': args.auto_close})
+                if args.auto_close and not info.get('auto_close'):
+                    raise SystemExit('the served environment cannot auto-close; '
+                                     'restart env_server from this commit')
             except RuntimeError as error:
                 stop_reason = 'reset failed: {}'.format(error)
                 print(stop_reason)
@@ -65,6 +71,8 @@ def main():
             step = 0
             while True:
                 action = common.act(agent, np.asarray(observation, dtype=np.float32))
+                if args.auto_close:
+                    action = common.without_close(action)
                 next_observation, reward, terminated, truncated, info = env.step(action)
                 transitions.append(Transition(
                     observation=observation, policy_action=action, executed_action=action,
@@ -96,6 +104,7 @@ def main():
     held = int(sum(o['reward'] for o in outcomes))
     common.write_json(out / 'summary.json', dict(
         checkpoint=checkpoint, deterministic=True, interventions=False,
+        auto_close=args.auto_close,
         environment=env.metadata.get('name'), episodes=len(outcomes), held=held,
         stop_reason=stop_reason, outcomes=outcomes))
     print('{}/{} held; saved {}'.format(held, len(outcomes), out))
