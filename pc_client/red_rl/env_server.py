@@ -19,6 +19,7 @@ import time
 import arm_control
 import pick_and_place as pick
 from pc_client.red_rl import env as red_env
+from pc_client.red_rl.intervene import RuleIntervention
 from pc_client.red_rl.rpc import EnvironmentRpcServer
 
 DEFAULT_PORT = 18766             # the simulation project uses 18765
@@ -86,6 +87,9 @@ def main():
             args=red_env.teacher_args(args.robot, args.robot_port, execute=True),
             audit_root=args.audit_root, seed=args.seed)
 
+    # The rule corrector is inert unless a reset asks for it (S3 training);
+    # evaluation never does.
+    environment = RuleIntervention(environment)
     server = EnvironmentRpcServer(environment, host=args.host, port=args.port)
     server.start_in_thread(dispatch_on_owner_thread=True)
     host, port = server.address

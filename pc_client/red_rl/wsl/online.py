@@ -17,6 +17,12 @@ Synchronous: one process, the arm steps (about a second each), then
 environment's safety box and episode endings are unchanged. Checkpoints,
 online transitions (schema version 1) and per-episode metrics go to the run
 directory; --resume continues from its latest checkpoint and transitions.
+
+S3 (--intervene): each reset asks the served environment for the rule
+corrector (intervene.py). When it takes over, info["intervene_action"] is
+the action actually executed; as in HIL-SERL's train_rlpd.py, that
+transition is stored with the executed action, marked as an intervention,
+and also added to the demonstration buffer.
 """
 
 import argparse
@@ -131,6 +137,9 @@ def main():
                         help='Episode step limit during training (evaluation keeps 20).')
     parser.add_argument('--max-failures', type=int, default=6,
                         help='Stop after this many unrewarded episodes in a row.')
+    parser.add_argument('--intervene', action='store_true',
+                        help='S3: let the rule corrector take over when the policy is '
+                             'clearly going wrong.')
     parser.add_argument('--host', default=None)
     parser.add_argument('--port', type=int, default=18766)
     parser.add_argument('--seed', type=int, default=0)
@@ -140,10 +149,12 @@ def main():
     out = Path(args.out)
     (out / 'transitions').mkdir(parents=True, exist_ok=True)
     demos = load_transition_dataset(args.demos)
-    demo_buffer = buffer_of(demos, len(demos))
-    seed = [t for path in args.seed_transitions for t in load_transition_dataset(path)]
     online_files = sorted((out / 'transitions').glob('episode_*.npz'))
     previous = [t for path in online_files for t in load_transition_dataset(path)]
+    corrected = [t for t in previous if t.intervention] if args.resume else []
+    # Room for the corrections to come: a full buffer would overwrite demos.
+    demo_buffer = buffer_of(demos + corrected, len(demos) + 20000)
+    seed = [t for path in args.seed_transitions for t in load_transition_dataset(path)]
     online_buffer = buffer_of(seed + (previous if args.resume else []), 50000)
 
     latest = checkpoints.latest_checkpoint(str((out / 'checkpoints').resolve()))
@@ -162,8 +173,9 @@ def main():
         for k in range(args.critic_warmup):
             batch = mixed_batch(source, demo_buffer, args.batch_size)
             agent, info = agent.update(batch, networks_to_update=frozenset({'critic'}))
-        print('  critic loss after warm-up: {:.4f}'.format(
-            scalars(info).get('critic/critic_loss', float('nan'))))
+        if args.critic_warmup:
+            print('  critic loss after warm-up: {:.4f}'.format(
+                scalars(info).get('critic/critic_loss', float('nan'))))
         common.save(agent, out / 'checkpoints', 0)
         common.write_json(out / 'config.json', dict(vars(args), init_checkpoint=checkpoint))
 
@@ -188,7 +200,11 @@ def main():
     try:
         while episode_index < args.episodes:
             try:
-                observation, info = env.reset(options={'max_steps': args.max_steps})
+                observation, info = env.reset(options={'max_steps': args.max_steps,
+                                                       'intervene': args.intervene})
+                if args.intervene and not info.get('intervention_enabled'):
+                    raise SystemExit('the served environment has no rule corrector; '
+                                     'restart env_server from this commit')
             except RuntimeError as error:
                 print('stopping, reset failed: {}'.format(error))
                 break
@@ -202,13 +218,20 @@ def main():
                 mode = common.act(agent, np.asarray(observation, dtype=np.float32))
                 action = explore(sample, mode, args)
                 next_observation, reward, terminated, truncated, info = env.step(action)
+                corrected = 'intervene_action' in info
+                executed = (np.asarray(info['intervene_action'], dtype=np.float32)
+                            if corrected else action)
                 transition = Transition(
-                    observation=observation, policy_action=action, executed_action=action,
+                    observation=observation, policy_action=action, executed_action=executed,
                     next_observation=next_observation, reward=reward,
-                    terminated=terminated, truncated=truncated, source='policy',
-                    intervention=False, episode_id=0, step_id=step, success=reward > 0.0)
+                    terminated=terminated, truncated=truncated,
+                    source='intervention' if corrected else 'policy',
+                    intervention=corrected, episode_id=0, step_id=step,
+                    success=reward > 0.0)
                 transitions.append(transition)
                 online_buffer.insert(serl(transition))
+                if corrected:
+                    demo_buffer.insert(serl(transition))
                 critic_only = run_steps < args.actor_delay_steps
                 for _ in range(args.utd):
                     batch = mixed_batch(online_buffer, demo_buffer, args.batch_size)
@@ -235,14 +258,20 @@ def main():
                     for key in losses[-1]}
             record = dict(episode=episode_index, audit=name, outcome=info.get('outcome'),
                           reward=float(reward), steps=step, seconds=round(time.time() - started, 1),
-                          update_step=update_step, **{k: round(v, 5) for k, v in mean.items()})
+                          update_step=update_step,
+                          interventions=int(info.get('intervention_count', 0)),
+                          intervention_steps=int(info.get('intervention_steps', 0)),
+                          policy_closed=bool(transitions[-1].policy_action[common.CLOSE] > 0.0
+                                             and not transitions[-1].intervention),
+                          **{k: round(v, 5) for k, v in mean.items()})
             with metrics_path.open('a', encoding='utf-8') as stream:
                 stream.write(json.dumps(record) + '\n')
             recent = [json.loads(line)['reward'] for line in
                       metrics_path.read_text(encoding='utf-8').splitlines()][-10:]
-            print('episode {:>3}: {:<13} {:>2} steps  last-10 success {:.0%}  critic {:.4f}  '
-                  'bc_mse {:.4f}  temp {:.4f}'.format(
-                      episode_index, str(info.get('outcome')), step, np.mean(recent),
+            print('episode {:>3}: {:<13} {:>2} steps  corrected {}x/{} steps  '
+                  'last-10 success {:.0%}  critic {:.4f}  bc_mse {:.4f}  temp {:.4f}'.format(
+                      episode_index, str(info.get('outcome')), step,
+                      record['interventions'], record['intervention_steps'], np.mean(recent),
                       mean.get('critic/critic_loss', float('nan')),
                       mean.get('actor/bc_mse', float('nan')),
                       mean.get('actor/temperature', float('nan'))), flush=True)
