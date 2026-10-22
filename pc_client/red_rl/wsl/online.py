@@ -158,6 +158,9 @@ def main():
     parser.add_argument('--auto-close', action='store_true',
                         help='The environment closes in the grasp region and the policy '
                              'only moves; demonstrations are recast to match.')
+    parser.add_argument('--intervene-progress', type=float, default=0.0,
+                        help='With --intervene, also take over whenever a move advances less '
+                             'than this fraction of the expert move (0 = clear mistakes only).')
     parser.add_argument('--intervene', action='store_true',
                         help='S3: let the rule corrector take over when the policy is '
                              'clearly going wrong.')
@@ -227,6 +230,7 @@ def main():
             try:
                 observation, info = env.reset(options={'max_steps': args.max_steps,
                                                        'intervene': args.intervene,
+                                                       'intervene_progress': args.intervene_progress,
                                                        'auto_close': args.auto_close})
                 if args.auto_close and not info.get('auto_close'):
                     raise SystemExit('the served environment cannot auto-close; '

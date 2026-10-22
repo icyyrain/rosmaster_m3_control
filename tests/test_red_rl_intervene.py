@@ -57,6 +57,18 @@ class ReasonTests(unittest.TestCase):
         coming_back = np.asarray([-0.5, 0.0, -1.0, -1.0], dtype=np.float32)
         self.assertIsNone(self.reason(obs, coming_back))
 
+    def test_the_attentive_rule_takes_over_a_policy_not_heading_for_the_goal(self):
+        obs = observation(dx=40, dy=-30, height=12.0)
+        expert_like = np.asarray(expert(obs), dtype=np.float32)
+        half_hearted = expert_like * np.asarray([0.3, 0.3, 0.3, 1.0], dtype=np.float32)
+        for action in (expert_like, half_hearted):
+            # off by default
+            self.assertIsNone(intervene.reason_to_intervene(obs, action, [(12.0, 50.0)], 10))
+        self.assertIsNone(intervene.reason_to_intervene(
+            obs, expert_like, [(12.0, 50.0)], 10, min_progress=0.5))
+        self.assertEqual(intervene.reason_to_intervene(
+            obs, half_hearted, [(12.0, 50.0)], 10, min_progress=0.5), 'not_heading_for_the_goal')
+
     def test_closing_is_never_overridden_for_time_or_height(self):
         self.assertIsNone(self.reason(observation(height=-1.0), action=CLOSE, steps_left=1))
 

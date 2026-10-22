@@ -30,6 +30,15 @@ rather than only climbing: the episode ends after two steps without it.
 Off unless the episode asks: reset(options={"intervene": True}). Evaluation
 never asks, so it always measures the policy alone.
 
+With options["intervene_progress"] = f (0 < f <= 1) it is also attentive, as
+the person in the HIL-SERL paper is early in training: it takes over whenever
+the policy's move advances toward the goal by less than f of what the
+expert's move would (the expert's direction, descent included). This needs
+no schedule: as the policy comes to move like the expert, it is taken over
+less. The rules above alone only catch clear mistakes, and in the kinematic
+fake a policy started from scratch needed about 225 episodes before it
+finished any episode on its own.
+
 The first S3 run (2026-10-20) took over whenever the sweet was more than
 80 px off. Ten of its fifteen takeovers came in the first steps, where the
 deliberately offset start alone puts the sweet 90-170 px off and the policy
@@ -54,6 +63,7 @@ BOTTOM_DY_PX = 25.0
 # Of 43 held evaluation grasps up to 2026-10-20 the highest closed 4.6 mm
 # above the grasp height and the furthest 65 px off the gripper pixel.
 CLOSE_HEIGHT_MM = 6.0
+MIN_WANTED_MM = 1.0              # attentive rule: ignore moves the expert hardly wants
 CLOSE_ERROR_PX = 70.0
 STALL_STEPS = 3
 STALL_HEIGHT_MM = 0.5            # less descent than this over STALL_STEPS steps
@@ -64,11 +74,12 @@ UP = red_env.ACTION_NAMES.index('up')
 CLOSE = red_env.ACTION_NAMES.index('close')
 
 
-def reason_to_intervene(observation, action, history, steps_left):
+def reason_to_intervene(observation, action, history, steps_left, min_progress=0.0):
     """Why the expert should take over now, or None.
 
     `history` holds (height_to_grasp_mm, error_px) of the observations since
     the policy last took control, latest last, including this one.
+    `min_progress` > 0 adds the attentive rule (see the module docstring).
     """
     dx, dy, visible, height, _ = red_expert.read(observation)
     closing = action[CLOSE] > red_env.CLOSE_THRESHOLD
@@ -89,7 +100,22 @@ def reason_to_intervene(observation, action, history, steps_left):
         if (then[0] - now[0] < STALL_HEIGHT_MM
                 and then[1] - now[1] < STALL_ERROR_PX):
             return 'no_progress'
+    if min_progress > 0.0 and not closing:
+        advance, wanted = progress_mm(observation, action)
+        if wanted >= MIN_WANTED_MM and advance < min_progress * wanted:
+            return 'not_heading_for_the_goal'
     return None
+
+
+def progress_mm(observation, action):
+    """(how far this move goes along the expert's move, the expert's move length), mm."""
+    desired = np.asarray(red_expert.expert(observation)[:CLOSE], dtype=float) \
+        * cartesian.MAX_STEP_MM
+    wanted = float(np.linalg.norm(desired))
+    if wanted < 1e-6:
+        return 0.0, 0.0
+    move = np.asarray(action[:CLOSE], dtype=float) * cartesian.MAX_STEP_MM
+    return float(move @ desired / wanted), wanted
 
 
 def toward_mm(observation, action):
@@ -111,6 +137,7 @@ class RuleIntervention(gym.Wrapper):
         self.corrector = policy
         self.takeover_steps = takeover_steps
         self.active = False
+        self.min_progress = 0.0
         self._clear()
 
     def _clear(self):
@@ -126,6 +153,7 @@ class RuleIntervention(gym.Wrapper):
     def reset(self, *, seed=None, options=None):
         options = dict(options or {})
         self.active = bool(options.pop('intervene', False))
+        self.min_progress = float(options.pop('intervene_progress', 0.0) or 0.0)
         observation, info = self.env.reset(seed=seed, options=options)
         self._clear()
         self.observation = observation
@@ -152,7 +180,8 @@ class RuleIntervention(gym.Wrapper):
                 steps_left = getattr(self.env.unwrapped, 'max_steps',
                                      red_env.MAX_STEPS) - self.steps
                 self.reason = reason_to_intervene(self.observation, action,
-                                                  self.history, steps_left)
+                                                  self.history, steps_left,
+                                                  self.min_progress)
                 if self.reason is not None:
                     self.remaining = self.takeover_steps
                     self.count += 1
