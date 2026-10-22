@@ -23,6 +23,13 @@ the rule corrector for the person: a freshly initialised agent, plain SAC
 updates (no pull toward the demonstrations), demonstrations only as half of
 every batch.
 
+--intervention-penalty p (after RLIF, Luo et al. 2023): when the corrector
+takes over, a second transition is stored for that state with the policy's
+own proposed action, reward -p, terminal. The executed (corrector) step is
+kept as well. A rescued episode otherwise makes the policy's mistake look
+free: the episode still ends held. These penalty transitions go to the online
+buffer only and are saved as transitions/penalty_*.npz.
+
 S3 (--intervene): each reset asks the served environment for the rule
 corrector (intervene.py). When it takes over, info["intervene_action"] is
 the action actually executed; as in HIL-SERL's train_rlpd.py, that
@@ -164,6 +171,9 @@ def main():
     parser.add_argument('--intervene-cooldown', type=int, default=0,
                         help='Steps the policy keeps after each takeover before the '
                              'attentive rule may take over again.')
+    parser.add_argument('--intervention-penalty', type=float, default=0.0,
+                        help='Reward for the policy action that made the corrector take '
+                             'over, stored as an extra terminal transition (RLIF). 0 = off.')
     parser.add_argument('--intervene', action='store_true',
                         help='S3: let the rule corrector take over when the policy is '
                              'clearly going wrong.')
@@ -182,6 +192,8 @@ def main():
               '({} dropped: closed outside the grasp region)'.format(kept, len(demos), dropped))
     online_files = sorted((out / 'transitions').glob('episode_*.npz'))
     previous = [t for path in online_files for t in load_transition_dataset(path)]
+    previous += [t for path in sorted((out / 'transitions').glob('penalty_*.npz'))
+                 for t in load_transition_dataset(path)]
     corrected = [t for t in previous if t.intervention] if args.resume else []
     # Room for the corrections to come: a full buffer would overwrite demos.
     demo_buffer = buffer_of(demos + corrected, len(demos) + 20000)
@@ -246,7 +258,7 @@ def main():
                 print('stopping, reset failed: {}'.format(error))
                 break
             name, step, transitions, started = info.get('episode'), 0, [], time.time()
-            losses = []
+            losses, penalties, was_corrected = [], [], False
             while True:
                 rng, key = jax.random.split(rng)
                 sample = np.array(agent.sample_actions(
@@ -273,6 +285,15 @@ def main():
                 online_buffer.insert(serl(transition))
                 if corrected:
                     demo_buffer.insert(serl(transition))
+                if corrected and not was_corrected and args.intervention_penalty > 0.0:
+                    penalty = Transition(
+                        observation=observation, policy_action=action, executed_action=action,
+                        next_observation=next_observation, reward=-args.intervention_penalty,
+                        terminated=True, truncated=False, source='policy', intervention=False,
+                        episode_id=len(penalties), step_id=0, success=False)
+                    penalties.append(penalty)
+                    online_buffer.insert(serl(penalty))
+                was_corrected = corrected
                 critic_only = run_steps < args.actor_delay_steps
                 for _ in range(args.utd):
                     batch = mixed_batch(online_buffer, demo_buffer, args.batch_size)
@@ -291,6 +312,9 @@ def main():
             episode_index += 1
             save_transition_dataset(
                 out / 'transitions' / 'episode_{:04d}.npz'.format(episode_index), transitions)
+            if penalties:
+                save_transition_dataset(
+                    out / 'transitions' / 'penalty_{:04d}.npz'.format(episode_index), penalties)
             failures = 0 if reward > 0 else failures + 1
             mean = {key: float(np.mean([l[key] for l in losses if key in l]))
                     for key in losses[-1]}
