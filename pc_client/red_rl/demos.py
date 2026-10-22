@@ -183,6 +183,38 @@ def build(run_summaries, out, audit_root='datasets/red_sweet_rl'):
     return summary
 
 
+def subset(path, out, count, seed):
+    """`count` whole episodes of a file, chosen at random with `seed`, renumbered.
+
+    For the few-demonstration runs: BC and the online learner must see the
+    same episodes, so they are written once and both read the file.
+    """
+    arrays = load(path)
+    split = episodes(arrays)
+    if not 0 < count <= len(split):
+        raise ValueError('{} has {} episodes, asked for {}'.format(path, len(split), count))
+    chosen = sorted(np.random.default_rng(seed).choice(len(split), count, replace=False).tolist())
+    transitions = []
+    for new_id, old_id in enumerate(chosen):
+        for i in split[old_id]:
+            transitions.append(dict(
+                observation=arrays['observations'][i],
+                action=arrays['executed_actions'][i],
+                next_observation=arrays['next_observations'][i],
+                reward=float(arrays['rewards'][i]),
+                terminated=bool(arrays['terminated'][i]),
+                truncated=bool(arrays['truncated'][i]),
+                step_id=int(arrays['step_ids'][i]),
+                episode_id=new_id))
+    out = run_expert.save_transitions(out, transitions)
+    summary = dict(source=dict(path=str(path), sha256=run_expert.sha256(path)),
+                   seed=seed, chosen_episodes=chosen, episodes=count,
+                   transitions=len(transitions), output_sha256=run_expert.sha256(out))
+    Path(out).with_suffix('.json').write_text(
+        json.dumps(summary, indent=2) + '\n', encoding='utf-8')
+    return summary
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -196,7 +228,17 @@ def main():
     build_parser.add_argument('--audit-root', default='datasets/red_sweet_rl')
     summary_parser = commands.add_parser('summary')
     summary_parser.add_argument('path')
+    subset_parser = commands.add_parser('subset')
+    subset_parser.add_argument('path')
+    subset_parser.add_argument('out')
+    subset_parser.add_argument('--episodes', type=int, required=True)
+    subset_parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
+    if args.command == 'subset':
+        summary = subset(args.path, args.out, args.episodes, args.seed)
+        print('episodes {chosen_episodes} of {0}: {transitions} transitions -> {1}'.format(
+            args.path, args.out, **summary))
+        return 0
     if args.command == 'merge':
         summary = merge(args.inputs, args.out)
         print('{episodes} episodes ({successful_episodes} successful), '
