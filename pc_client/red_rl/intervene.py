@@ -39,6 +39,12 @@ less. The rules above alone only catch clear mistakes, and in the kinematic
 fake a policy started from scratch needed about 225 episodes before it
 finished any episode on its own.
 
+Attentive alone took over 70-94% of the steps of a 300-episode fake run (a
+fresh policy's noisy moves rarely reach half the expert's), and the policy,
+hardly ever acting, learned nothing it could use alone (0/20). With
+options["intervene_cooldown"] = n, the policy then gets n steps of its own
+after each takeover, in which only the clear-mistake rules apply.
+
 The first S3 run (2026-10-20) took over whenever the sweet was more than
 80 px off. Ten of its fifteen takeovers came in the first steps, where the
 deliberately offset start alone puts the sweet 90-170 px off and the policy
@@ -138,6 +144,7 @@ class RuleIntervention(gym.Wrapper):
         self.takeover_steps = takeover_steps
         self.active = False
         self.min_progress = 0.0
+        self.cooldown = 0
         self._clear()
 
     def _clear(self):
@@ -146,6 +153,7 @@ class RuleIntervention(gym.Wrapper):
         self.history = []
         self.steps = 0
         self.remaining = 0
+        self.cooling = 0
         self.reason = None
         self.count = 0
         self.intervention_steps = 0
@@ -154,6 +162,7 @@ class RuleIntervention(gym.Wrapper):
         options = dict(options or {})
         self.active = bool(options.pop('intervene', False))
         self.min_progress = float(options.pop('intervene_progress', 0.0) or 0.0)
+        self.cooldown = int(options.pop('intervene_cooldown', 0) or 0)
         observation, info = self.env.reset(seed=seed, options=options)
         self._clear()
         self.observation = observation
@@ -179,9 +188,10 @@ class RuleIntervention(gym.Wrapper):
             if self.remaining == 0:
                 steps_left = getattr(self.env.unwrapped, 'max_steps',
                                      red_env.MAX_STEPS) - self.steps
-                self.reason = reason_to_intervene(self.observation, action,
-                                                  self.history, steps_left,
-                                                  self.min_progress)
+                self.reason = reason_to_intervene(
+                    self.observation, action, self.history, steps_left,
+                    self.min_progress if self.cooling == 0 else 0.0)
+                self.cooling = max(0, self.cooling - 1)
                 if self.reason is not None:
                     self.remaining = self.takeover_steps
                     self.count += 1
@@ -204,6 +214,7 @@ class RuleIntervention(gym.Wrapper):
                         intervention_reason=self.reason)
             if self.remaining == 0:
                 self.history = []      # judge the policy afresh once it is back
+                self.cooling = self.cooldown
         if terminated or truncated:
             info = dict(info, intervention_count=self.count,
                         intervention_steps=self.intervention_steps)

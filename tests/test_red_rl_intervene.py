@@ -129,6 +129,34 @@ class WrapperTests(unittest.TestCase):
         self.assertGreaterEqual(back[intervene.UP], 0.0)     # never descending blind
         self.assertLess(back[intervene.CLOSE], 0.0)
 
+    def test_a_cooldown_leaves_the_policy_its_own_steps(self):
+        slow = lambda obs: np.asarray(expert(obs), dtype=np.float32) * np.asarray(
+            [0.3, 0.3, 0.3, 1.0], dtype=np.float32)
+
+        def runs(cooldown):
+            env = intervene.RuleIntervention(red_env.FakeRedSweetEnv(seed=4))
+            obs, _ = env.reset(options={'intervene': True, 'intervene_progress': 0.5,
+                                        'intervene_cooldown': cooldown, 'auto_close': True})
+            flags = []
+            for _ in range(red_env.MAX_STEPS):
+                obs, _, terminated, truncated, info = env.step(slow(obs))
+                flags.append('intervene_action' in info)
+                if terminated or truncated:
+                    break
+            gaps, run = [], 0
+            for flag in flags:
+                if flag and run:
+                    gaps.append(run)
+                run = 0 if flag else run + 1
+            return flags, gaps
+
+        flags, gaps = runs(0)
+        self.assertTrue(any(flags))
+        self.assertTrue(all(g >= 1 for g in gaps))
+        flags, gaps = runs(3)
+        self.assertTrue(any(flags))
+        self.assertTrue(all(g >= 3 for g in gaps), gaps)
+
     def test_takeover_is_short(self):
         steps, _ = self.run_episode(lambda obs: HOVER, intervene_on=True)
         run = 0
