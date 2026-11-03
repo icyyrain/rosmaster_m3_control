@@ -23,3 +23,6 @@ vendor/
 recordings/
 datasets/
 models/
+
+# Reports exported for readers outside the repo; the source notes live in docs/.
+docs/external_reports/
